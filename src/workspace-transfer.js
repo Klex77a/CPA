@@ -116,7 +116,12 @@ function importEntries(input, dependencies = {}) {
     if (seen.has(key)) fail('Пакет содержит повторяющийся ID записи.');
     seen.add(key);
     const existing = store.read(entry.collection, entry.id);
-    if (existing != null && canonical(existing) === canonical(entry.value)) summary.skipped++;
+    // Explicit restoration must also retain source property order: historical
+    // transcript/cache identities were produced from the original JSON bytes.
+    // A jsonb-backed workspace can have equal values in a different key order.
+    const identical = existing != null && canonical(existing) === canonical(entry.value);
+    const restoreOrder = identical && input.replace && JSON.stringify(existing) !== JSON.stringify(entry.value);
+    if (identical && !restoreOrder) summary.skipped++;
     else {
       if (existing != null && !input.replace) fail('Запись уже существует с другим содержимым. Требуется явный replace.', 409);
       pending.push(entry);

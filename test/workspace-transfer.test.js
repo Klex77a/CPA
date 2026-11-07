@@ -1,5 +1,6 @@
 'use strict';
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const { COLLECTIONS, MAX_BYTES, importEntries, exportEntries, chunkEntries } = require('../src/workspace-transfer');
 const { parseArgs, migrateWorkspace } = require('../scripts/migrate-workspace');
@@ -72,6 +73,19 @@ async function test(name, run) { await run(); passed++; console.log('✔', name)
     assert.throws(() => importEntries({ entries: [entries[1], changed] }, { store }), (error) => error.status === 409);
     assert.equal(store.writes, 0);
     assert.equal(importEntries({ entries: [changed], replace: true }, { store }).replaced, 1);
+  });
+  await test('explicit restore recovers JSON key order required by historical transcript identities', () => {
+    const reorder = (value) => Array.isArray(value) ? value.map(reorder) : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.length - b.length || a.localeCompare(b)).map(([key, child]) => [key, reorder(child)])) : value;
+    const hash = (value) => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+    const reordered = { ...entries[0], value: reorder(dataset) };
+    assert.deepEqual(reordered.value, dataset, 'jsonb changes property order while preserving values');
+    const store = memory([reordered]);
+    const originalHash = hash(dataset.records[0].transcript);
+    assert.notEqual(hash(store.read('datasets', dataset.group_id).records[0].transcript), originalHash);
+    assert.equal(importEntries({ entries: [entries[0]] }, { store }).skipped, 1, 'a normal import does not overwrite existing data');
+    assert.equal(importEntries({ entries: [entries[0]], replace: true }, { store }).replaced, 1);
+    assert.equal(hash(store.read('datasets', dataset.group_id).records[0].transcript), originalHash);
+    assert.equal(importEntries({ entries: [entries[0]], replace: true }, { store }).skipped, 1, 'the restored order is stable on retry');
   });
   await test('UTF-8 chunking stays below one MiB and never splits a stored document', () => {
     const large = Array.from({ length: 5 }, (_, index) => ({ ...entries[0], id: 'large-' + index, value: { ...dataset, group_id: 'large-' + index, records: [{ ...record, transcript: [{ ...record.transcript[0], text: 'я'.repeat(240000) }] }] } }));

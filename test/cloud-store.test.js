@@ -4,16 +4,29 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 process.env.CQA_STORAGE_DRIVER = 'postgres';
 process.env.LLM_PROVIDER = 'mock';
 process.env.CQA_DATA_DIR = path.join(os.tmpdir(), `cqa-cloud-no-files-${process.pid}-${Date.now()}`);
 const store = require('../src/store');
 const { createCloudStore, withCloudStore } = require('../src/cloud-store');
+const { cacheKey } = require('../src/evaluator');
+const { evaluationFreshness } = require('../src/evaluation-freshness');
+const defaultChecklist = require('../src/default-checklist.json');
 const clone = (value) => JSON.parse(JSON.stringify(value));
+// PostgreSQL JSONB normalizes object keys recursively. Simulate that property
+// so changing the production column/casts back to JSONB breaks identity tests.
+const normalizeJsonb = (value) => Array.isArray(value) ? value.map(normalizeJsonb) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, normalizeJsonb(value[key])])) : value;
+const transcriptHash = (transcript) => crypto.createHash('sha256').update(JSON.stringify(transcript)).digest('hex').slice(0, 16);
 const defer = () => { let resolve; const promise = new Promise((done) => { resolve = done; }); return { promise, resolve }; };
 
 class FakePool {
-  constructor() { this.rows = new Map(); this.events = []; this.locks = new Map(); this.waiters = new Map(); this.nextClient = 0; this.failCommit = false; }
+  constructor({ payloadType = null } = {}) { this.payloadType = payloadType; this.rows = new Map(); this.events = []; this.locks = new Map(); this.waiters = new Map(); this.nextClient = 0; this.failCommit = false; }
+  decodePayload(sql, value) {
+    assert.equal(/\$2::(jsonb?)(?:\W|$)/.exec(sql)?.[1], this.payloadType, 'writes use an explicit cast matching the durable column');
+    const parsed = JSON.parse(value);
+    return this.payloadType === 'jsonb' ? normalizeJsonb(parsed) : parsed;
+  }
   async acquire(id, client) {
     while (this.locks.has(id)) await new Promise((resolve) => { const list = this.waiters.get(id) || []; list.push(resolve); this.waiters.set(id, list); });
     this.locks.set(id, client.id); client.locked = id;
@@ -29,9 +42,21 @@ class FakePool {
     client.query = async (raw, params = []) => {
       const sql = raw.replace(/\s+/g, ' ').trim();
       pool.events.push({ client: client.id, sql, params });
-      if (sql.startsWith('CREATE TABLE')) return { rows: [] };
+      if (sql.startsWith('CREATE TABLE')) {
+        if (!pool.payloadType) pool.payloadType = /payload (jsonb?) NOT NULL/.exec(sql)?.[1];
+        return { rows: [] };
+      }
+      if (sql.startsWith('SELECT format_type')) return { rows: pool.payloadType ? [{ payload_type: pool.payloadType }] : [] };
+      if (sql.startsWith('ALTER TABLE')) {
+        assert.equal(sql, 'ALTER TABLE cqa_workspaces ALTER COLUMN payload TYPE json USING payload::json');
+        assert.equal(client.transaction, true);
+        assert.equal(pool.payloadType, 'jsonb', 'only an existing JSONB payload needs migration');
+        pool.payloadType = 'json';
+        return { rows: [] };
+      }
       if (sql.startsWith('INSERT INTO')) {
-        if (!pool.rows.has(params[0])) pool.rows.set(params[0], { payload: JSON.parse(params[1]), revision: 0 });
+        const payload = pool.decodePayload(sql, params[1]);
+        if (!pool.rows.has(params[0])) pool.rows.set(params[0], { payload, revision: 0 });
         return { rows: [] };
       }
       if (sql === 'BEGIN') { client.transaction = true; return { rows: [] }; }
@@ -43,7 +68,7 @@ class FakePool {
       }
       if (sql.startsWith('UPDATE cqa_workspaces')) {
         assert.equal(client.transaction, true); assert.equal(client.locked, params[0]);
-        client.pending.set(params[0], { payload: JSON.parse(params[1]), revision: pool.rows.get(params[0]).revision + 1 });
+        client.pending.set(params[0], { payload: pool.decodePayload(sql, params[1]), revision: pool.rows.get(params[0]).revision + 1 });
         return { rows: [], rowCount: 1 };
       }
       if (sql === 'COMMIT') {
@@ -80,10 +105,75 @@ const test = async (name, run) => { await run(); passed++; console.log('✔', na
       assert.throws(() => store.remove('checklists', 'default'), (error) => error.code === 'CLOUD_STORE_READ_ONLY');
     });
     assert.equal(pool.events.filter((event) => event.sql.startsWith('INSERT')).length, 1);
+    assert.equal(pool.payloadType, 'json');
+    assert.equal(pool.events.some((event) => event.sql.startsWith('ALTER TABLE')), false);
     assert.equal(pool.events.some((event) => event.sql.startsWith('UPDATE')), false);
     const initializationEnd = pool.events.findIndex((event) => event.sql === 'COMMIT');
     assert.equal(pool.events.slice(initializationEnd + 1).some((event) => event.sql === 'BEGIN'), false, 'reads do not open mutation transactions after initialization');
     assert.equal(fs.existsSync(process.env.CQA_DATA_DIR), false);
+  });
+  await test('JSON round trips preserve original serialization, transcript freshness and legacy cache identity', async () => {
+    const pool = new FakePool(), run = createCloudStore({ pool });
+    const record = {
+      conversation_id: 'ordered-transcript', channel: 'chat', language: 'ru',
+      transcript: [{ timestamp: 0, speaker: 'operator', text: 'Synthetic greeting' }, { timestamp: 1000, speaker: 'client', text: 'Synthetic question' }],
+    };
+    const checklist = clone(defaultChecklist);
+    const dataset = { group_id: 'SYNTHETIC', records: [record] };
+    const evaluation = {
+      id: 'saved-result', conversation_id: record.conversation_id, channel: record.channel, language: record.language,
+      checklist: { id: checklist.id, version: checklist.version }, transcript_hash: transcriptHash(record.transcript),
+      cache_key: cacheKey(record, checklist),
+    };
+    assert.notEqual(transcriptHash(normalizeJsonb(record.transcript)), evaluation.transcript_hash, 'the fixture detects JSONB object-key normalization');
+    assert.notEqual(cacheKey(normalizeJsonb(record), normalizeJsonb(checklist)), evaluation.cache_key);
+    await run({}, () => {
+      store.write('datasets', dataset.group_id, dataset);
+      store.write('checklists', checklist.id, checklist);
+      store.write('evaluations', evaluation.id, evaluation);
+    });
+    // An unrelated update rewrites the complete workspace. A fresh adapter then
+    // follows the same bootstrap/read path as a separate serverless instance.
+    await run({}, () => store.write('jobs', 'unrelated', { id: 'unrelated' }));
+    const readAgain = createCloudStore({ pool });
+    await readAgain({ readOnly: true }, () => {
+      const savedDataset = store.read('datasets', dataset.group_id);
+      const savedChecklist = store.read('checklists', checklist.id);
+      const savedEvaluation = store.read('evaluations', evaluation.id);
+      assert.equal(JSON.stringify(savedDataset), JSON.stringify(dataset));
+      assert.equal(JSON.stringify(savedChecklist), JSON.stringify(checklist));
+      assert.equal(JSON.stringify(savedEvaluation), JSON.stringify(evaluation));
+      assert.equal(cacheKey(savedDataset.records[0], savedChecklist), savedEvaluation.cache_key);
+      assert.deepEqual(evaluationFreshness(savedEvaluation, savedDataset.records[0], savedChecklist), { stale: false, stale_reasons: [], record_changed: false });
+    });
+    assert.equal(pool.events.some((event) => event.sql.startsWith('ALTER TABLE')), false);
+  });
+  await test('an existing JSONB workspace is converted once under the bootstrap lock without losing records', async () => {
+    const pool = new FakePool({ payloadType: 'jsonb' });
+    const payload = normalizeJsonb({ datasets: { DEV: { group_id: 'DEV', records: [{ conversation_id: 'existing' }] } }, checklists: { default: clone(defaultChecklist) }, evaluations: { prior: { id: 'prior', history: [{ action: 'confirmed' }] } }, appeals: {}, failures: {}, jobs: {} });
+    pool.rows.set('midnight-commit', { payload: clone(payload), revision: 7 });
+    const run = createCloudStore({ pool });
+    await run({ readOnly: true }, () => assert.deepEqual(store.read('datasets', 'DEV'), payload.datasets.DEV));
+    await run({ readOnly: true }, () => assert.deepEqual(store.read('evaluations', 'prior'), payload.evaluations.prior));
+    await createCloudStore({ pool })({ readOnly: true }, () => {});
+    assert.equal(pool.payloadType, 'json');
+    assert.deepEqual(pool.rows.get('midnight-commit'), { payload, revision: 7 });
+    const alters = pool.events.filter((event) => event.sql.startsWith('ALTER TABLE'));
+    assert.equal(alters.length, 1, 'already migrated JSON columns are never altered on later cold starts');
+    const alterIndex = pool.events.indexOf(alters[0]);
+    const bootstrap = pool.events.slice(0, alterIndex + 1);
+    assert.ok(bootstrap.findIndex((event) => event.sql === 'BEGIN') < bootstrap.findIndex((event) => event.sql.includes('pg_advisory_xact_lock')));
+    assert.ok(bootstrap.findIndex((event) => event.sql.includes('pg_advisory_xact_lock')) < bootstrap.findIndex((event) => event.sql.startsWith('SELECT format_type')));
+    assert.equal(bootstrap.some((event) => event.sql === 'COMMIT'), false, 'migration stays inside the bootstrap transaction');
+    assert.equal(pool.events.some((event) => /DELETE|DROP TABLE|TRUNCATE/.test(event.sql)), false);
+  });
+  await test('an unexpected existing payload type fails closed without altering the table or running callbacks', async () => {
+    const pool = new FakePool({ payloadType: 'text' }), run = createCloudStore({ pool });
+    let calls = 0;
+    await assert.rejects(run({}, () => { calls++; }), (error) => error.status === 503);
+    assert.equal(calls, 0);
+    assert.equal(pool.events.some((event) => event.sql.startsWith('ALTER TABLE')), false);
+    assert.equal(pool.events.some((event) => event.sql === 'ROLLBACK'), true);
   });
   await test('mutations commit before resolving, support safe imported IDs, and preserve copy semantics', async () => {
     const pool = new FakePool(), run = createCloudStore({ pool });

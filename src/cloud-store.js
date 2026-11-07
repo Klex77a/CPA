@@ -31,11 +31,24 @@ function createCloudStore({ pool, workspaceId = 'midnight-commit', lockTimeoutMs
         await client.query('SELECT pg_advisory_xact_lock(1129402707)');
         await client.query(`CREATE TABLE IF NOT EXISTS cqa_workspaces (
           id text PRIMARY KEY,
-          payload jsonb NOT NULL,
+          payload json NOT NULL,
           revision bigint NOT NULL DEFAULT 0,
           updated_at timestamptz NOT NULL DEFAULT now()
         )`);
-        await client.query('INSERT INTO cqa_workspaces (id, payload) VALUES ($1, $2::jsonb) ON CONFLICT (id) DO NOTHING', [workspaceId, JSON.stringify(initialSnapshot())]);
+        // Legacy transcript hashes/cache keys serialize nested objects in their
+        // original key order. JSONB normalizes that order, so keep the opaque
+        // workspace as JSON; none of our queries inspect fields inside it.
+        const column = await client.query(`SELECT format_type(a.atttypid, a.atttypmod) AS payload_type
+          FROM pg_attribute AS a
+          WHERE a.attrelid = 'cqa_workspaces'::regclass
+            AND a.attname = 'payload' AND NOT a.attisdropped`);
+        const payloadType = column.rows?.[0]?.payload_type;
+        if (payloadType === 'jsonb') {
+          await client.query('ALTER TABLE cqa_workspaces ALTER COLUMN payload TYPE json USING payload::json');
+        } else if (payloadType !== 'json') {
+          throw unavailable();
+        }
+        await client.query('INSERT INTO cqa_workspaces (id, payload) VALUES ($1, $2::json) ON CONFLICT (id) DO NOTHING', [workspaceId, JSON.stringify(initialSnapshot())]);
         await client.query('COMMIT');
         initialized = true;
       } catch (error) {
@@ -71,7 +84,7 @@ function createCloudStore({ pool, workspaceId = 'midnight-commit', lockTimeoutMs
       let response;
       try { response = await store.withSnapshot(snapshot, { readOnly: false }, callback); }
       catch (error) { callbackFailed = true; throw error; }
-      await client.query('UPDATE cqa_workspaces SET payload = $2::jsonb, revision = revision + 1, updated_at = now() WHERE id = $1', [workspaceId, JSON.stringify(snapshot)]);
+      await client.query('UPDATE cqa_workspaces SET payload = $2::json, revision = revision + 1, updated_at = now() WHERE id = $1', [workspaceId, JSON.stringify(snapshot)]);
       await client.query('COMMIT');
       transaction = false;
       return response;

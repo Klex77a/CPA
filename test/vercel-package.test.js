@@ -39,12 +39,27 @@ const allowed = [
   'docs/DEMO_SCRIPT.md', 'docs/benchmark-results/latest.json',
   'test/fixtures/benchmark-cases.json', 'results/dev/results.json', 'results/prod/results.json',
 ];
+// CLI 65's native walker evaluates ancestor directory paths without a trailing
+// slash. Git's file-only check below accepted !api/ even when the CLI pruned api.
+// Keep explicit path-only negations for every ancestor in this upload allowlist.
+const ignoreRules = fs.readFileSync(path.join(root, '.vercelignore'), 'utf8').split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith('#'));
+const ancestors = new Set(allowed.flatMap((relative) => {
+  const parts = relative.split('/');
+  return parts.slice(0, -1).map((_part, index) => parts.slice(0, index + 1).join('/'));
+}));
+for (const directory of ancestors) {
+  // Children of wholly allowed runtime trees need no further exception.
+  const ignoredByParentRule = ignoreRules.some((rule) => !rule.startsWith('!') && (rule === '/*' && !directory.includes('/') || rule === directory.slice(0, directory.lastIndexOf('/')) + '/*'));
+  if (ignoredByParentRule) assert.ok(ignoreRules.includes('!' + directory), directory + ' needs a slashless native-walker allow rule');
+}
+for (const rule of ignoreRules) assert.ok(!rule.endsWith('/'), 'directory rules must also match native CLI path strings: ' + rule);
 const privatePaths = [
   '.env', '.env.production', '.vercel/project.json', '.cache/package.json', '.codex/settings.json',
   'data/datasets/DEV.json', 'data/evaluations/private.json', 'tmp/qa-report.json',
   'output/benchmark/latest.json', 'test-artifacts/screenshot.png',
   'src/.env.local', 'src/state.tmp', 'node_modules/pg/package.json',
   'test/fixtures/unreviewed.json', 'docs/benchmark-results/baseline.json', 'results/dev/private-copy.json',
+  'public/node_modules/private.js', 'src/.vercel/auth.json', 'public/.cache/private.json',
 ];
 for (const relative of [...allowed, ...privatePaths]) {
   const location = path.join(sandbox, relative);
