@@ -1,4 +1,4 @@
-import type { Conversation, Evaluation, Criterion } from '../../types';
+import type { Appeal, Conversation, Evaluation, Criterion } from '../../types';
 
 export const SPEAKERS: Record<string, string> = {
   operator: 'Оператор',
@@ -28,6 +28,47 @@ export function dateTime(value: string): string {
   return Number.isNaN(date.getTime())
     ? value
     : date.toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' });
+}
+
+const ASSESSMENT_LABELS = {
+  preliminary: 'Предварительная оценка ИИ',
+  contested: 'Оценка оспаривается',
+  reviewed: 'Результат после пересмотра',
+} as const;
+
+/** Workflow state comes from appeal decisions, never from a score difference. */
+export function assessmentStage(appeals: readonly Appeal[]) {
+  const openCount = appeals.filter((appeal) => appeal.status === 'open').length;
+  const reviewed = appeals.filter((appeal) => appeal.status === 'resolved' || !!appeal.decision);
+  const id = openCount ? 'contested' : reviewed.length ? 'reviewed' : 'preliminary';
+  return {
+    id,
+    label: ASSESSMENT_LABELS[id],
+    openCount,
+    reviewedCriterionCount: new Set(reviewed.map((appeal) => appeal.criterion_id)).size,
+  };
+}
+
+export function criterionAssessment(appeals: readonly Appeal[], criterionId: string) {
+  const history = appeals.filter((appeal) => appeal.criterion_id === criterionId);
+  const lastReview = [...history]
+    .filter((appeal) => appeal.status === 'resolved' || !!appeal.decision)
+    .sort((left, right) =>
+      (right.decision?.decided_at || right.created_at).localeCompare(
+        left.decision?.decided_at || left.created_at,
+      ),
+    )[0];
+  const stage = assessmentStage(history);
+  return {
+    ...stage,
+    label:
+      stage.id === 'preliminary'
+        ? 'Предложение ИИ'
+        : stage.id === 'contested'
+          ? 'Оспаривается'
+          : 'Рассмотрено проверяющим',
+    lastReview,
+  };
 }
 
 export function cardPath(groupId: string, conversationId: string, evaluationId?: string): string {

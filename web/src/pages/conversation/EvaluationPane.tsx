@@ -4,7 +4,9 @@ import { api } from '../../api';
 import { costDescription, usageDescription } from '../../format';
 import {
   answerText,
+  assessmentStage,
   cardPath,
+  criterionAssessment,
   dateTime,
   grossStatus,
   number,
@@ -49,22 +51,39 @@ function AnswerPill({ criterion, answer }: { criterion: Criterion; answer?: Answ
 
 function PrintReport({ evaluation, record }: { evaluation: Evaluation; record: Conversation }) {
   const sourceAvailable = !evaluation.record_changed || !!evaluation.record_snapshot;
+  const stage = assessmentStage(evaluation.appeals);
   return (
     <div className="conversation-print-report" aria-hidden="true">
       <p>
         {evaluation.group_id} · {evaluation.conversation_id} · {dateTime(evaluation.created_at)} ·{' '}
         {evaluation.provider} / {evaluation.model}
       </p>
+      <h3>{stage.label}</h3>
+      <p>ИИ может ошибаться. Оспорьте конкретный критерий — его рассмотрит проверяющий.</p>
+      <p>
+        Рассмотрено критериев: {stage.reviewedCriterionCount} из{' '}
+        {evaluation.checklist_snapshot.criteria.length}. Исходная оценка ИИ:{' '}
+        {number(evaluation.original_result.total)}; текущая оценка:{' '}
+        {number(evaluation.final_result.total)}.
+      </p>
       {evaluation.summary && <p>{evaluation.summary}</p>}
       <h3>Оценка по критериям</h3>
       {evaluation.checklist_snapshot.criteria.map((criterion) => {
         const answer = evaluation.final_criteria[criterion.id];
         const row = evaluation.final_result.criteria.find((item) => item.id === criterion.id);
+        const criterionStage = criterionAssessment(evaluation.appeals, criterion.id);
         return (
           <article className="conversation-print-criterion" key={criterion.id}>
             <h4>
               {criterion.code || criterion.id}. {criterion.title}
             </h4>
+            <p>
+              {criterionStage.label}
+              {criterionStage.lastReview?.decision
+                ? `: ${criterionStage.lastReview.decision.action === 'confirm' ? 'ответ подтверждён' : 'ответ изменён'}`
+                : ''}
+              .
+            </p>
             <p>
               <b>{answerText(criterion, answer)}</b> ·{' '}
               {criterion.type === 'flag'
@@ -105,7 +124,7 @@ function PrintReport({ evaluation, record }: { evaluation: Evaluation; record: C
                   <p>
                     {appeal.status === 'open'
                       ? 'На рассмотрении'
-                      : `${appeal.decision?.action === 'confirm' ? 'Оценка подтверждена' : 'Оценка изменена'}: ${appeal.decision?.reason || ''}. ${appeal.decision?.reviewer || ''}`}
+                      : `${appeal.decision?.action === 'confirm' ? 'Ответ подтверждён проверяющим' : 'Ответ изменён проверяющим'}: ${appeal.decision?.reason || ''}. ${appeal.decision?.reviewer || ''}`}
                   </p>
                 </div>
               ))}
@@ -350,6 +369,7 @@ function CriterionCard({
   );
   const appeals = evaluation.appeals.filter((appeal) => appeal.criterion_id === criterion.id);
   const openAppeal = appeals.some((appeal) => appeal.status === 'open');
+  const criterionStage = criterionAssessment(evaluation.appeals, criterion.id);
   const section = evaluation.checklist_snapshot.sections?.find(
     (item) => item.id === criterion.section,
   )?.name;
@@ -372,7 +392,7 @@ function CriterionCard({
     );
   return (
     <article
-      className={`conversation-criterion${answer?.review_required ? ' needs-review' : ''}${answer?.changed_by_appeal ? ' was-changed' : ''}`}
+      className={`conversation-criterion${answer?.review_required || openAppeal ? ' needs-review' : ''}${criterionStage.id === 'reviewed' ? ' was-changed' : ''}`}
     >
       <button
         className="conversation-criterion-toggle"
@@ -385,6 +405,7 @@ function CriterionCard({
           {section && <small>{section}</small>}
         </span>
         <span className="conversation-criterion-grade">
+          <span className="conversation-muted">{criterionStage.label}</span>
           <AnswerPill criterion={criterion} answer={answer} />
           <span
             title={`Исходный вес: ${criterion.weight}. Точная доля: ${row?.contribution ?? '—'} из ${row?.max_contribution ?? '—'}`}
@@ -399,13 +420,19 @@ function CriterionCard({
       {expanded && (
         <div className="conversation-criterion-body">
           {answer?.review_required && !answer.changed_by_appeal && (
-            <Notice>Ответ требует проверки человеком.</Notice>
+            <Notice>Ответ модели не прошёл проверку. Его можно оспорить.</Notice>
           )}
           {answer?.changed_by_appeal && (
             <Notice tone="info">
               Изменено по апелляции: «{answerText(criterion, original)}» (
               {number(originalRow?.points)} б.) → «{answerText(criterion, answer)}».{' '}
               {answer.reviewer_reason}
+            </Notice>
+          )}
+          {criterionStage.lastReview?.decision?.action === 'confirm' && (
+            <Notice tone="info">
+              Проверяющий подтвердил ответ по этому критерию.{' '}
+              {criterionStage.lastReview.decision.reason}
             </Notice>
           )}
           {!answer && <Notice>Модель не вернула ответ по этому критерию.</Notice>}
@@ -466,8 +493,8 @@ function CriterionCard({
                   <p>
                     <b>
                       {appeal.decision.action === 'confirm'
-                        ? 'Оценка подтверждена'
-                        : 'Оценка изменена'}
+                        ? 'Ответ подтверждён проверяющим'
+                        : 'Ответ изменён проверяющим'}
                       .
                     </b>{' '}
                     {appeal.decision.reason}
@@ -534,7 +561,7 @@ export default function EvaluationPane({
           <p>
             {archiveOnly
               ? 'Текст диалога или чек-лист изменился. Сохранённые результаты доступны в истории.'
-              : 'ИИ проверит критерии чек-листа, выделит доказательства и подготовит рекомендации.'}
+              : 'ИИ предложит предварительную оценку по критериям, обоснования и рекомендации.'}
           </p>
           <button
             className="conversation-button primary"
@@ -569,6 +596,7 @@ export default function EvaluationPane({
 
   const final = evaluation.final_result;
   const gross = grossStatus(evaluation);
+  const stage = assessmentStage(evaluation.appeals);
   const changed = final.total !== evaluation.original_result.total;
   const scoreColor =
     final.total == null
@@ -609,15 +637,15 @@ export default function EvaluationPane({
           style={
             { '--score': final.total || 0, '--score-color': scoreColor } as React.CSSProperties
           }
-          aria-label={`Итоговая оценка ${number(final.total)} из 100`}
+          aria-label={`${stage.label}: ${number(final.total)} из 100`}
         >
           <div>
             <strong>{number(final.total)}</strong>
-            <span>{changed ? 'финальный' : 'из 100'}</span>
+            <span>из 100</span>
           </div>
         </div>
         <div className="conversation-score-description">
-          <span className="conversation-eyebrow">ОЦЕНКА КАЧЕСТВА</span>
+          <span className="conversation-eyebrow">{stage.label}</span>
           <h2>{evaluation.operator_name || 'Результат диалога'}</h2>
           <div className="conversation-summary-badges">
             <span
@@ -627,7 +655,7 @@ export default function EvaluationPane({
                 ? 'Грубые ошибки: нужна проверка'
                 : gross === 'violation'
                   ? 'Выявлена грубая ошибка'
-                  : 'Грубых ошибок нет'}
+                  : 'Грубые ошибки не выявлены'}
             </span>
             {evaluation.stale && <span className="conversation-pill warning">Архив</span>}
             {evaluation.provider === 'mock' && (
@@ -637,9 +665,13 @@ export default function EvaluationPane({
           <p>
             {evaluation.checklist_snapshot.name} · v{evaluation.checklist.version}
           </p>
-          {changed && (
+          <p>ИИ может ошибаться. Оспорьте конкретный критерий — его рассмотрит проверяющий.</p>
+          {stage.reviewedCriterionCount > 0 && (
             <p className="conversation-score-change">
-              После апелляции: {number(evaluation.original_result.total)} → {number(final.total)}
+              Рассмотрено критериев: {stage.reviewedCriterionCount} из {criteria.length}.{' '}
+              {changed
+                ? `Оценка ${number(evaluation.original_result.total)} → ${number(final.total)}.`
+                : 'Баллы сохранены.'}
             </p>
           )}
         </div>
@@ -697,7 +729,7 @@ export default function EvaluationPane({
         )}
         {evaluation.status === 'needs_review' && (
           <Notice>
-            <b>Нужна проверка человеком.</b> Часть ответов модели не прошла валидацию.
+            <b>Ответ модели требует проверки.</b> Часть ответов не прошла валидацию.
             {!!evaluation.validation_errors?.length && (
               <details>
                 <summary>Причины ({evaluation.validation_errors.length})</summary>
@@ -833,8 +865,8 @@ export default function EvaluationPane({
             <div className="conversation-history-intro">
               <h3>Сохранённые оценки</h3>
               <p>
-                Каждый запуск сохраняет отдельный результат. Апелляции изменяют итог выбранной
-                оценки.
+                Каждый запуск сохраняет предварительную оценку ИИ. Решения проверяющего сохраняются
+                по спорным критериям выбранной оценки.
               </p>
             </div>
             {history.map((item) => (

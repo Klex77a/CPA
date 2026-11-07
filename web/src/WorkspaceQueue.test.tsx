@@ -241,6 +241,47 @@ describe('workspace queue execution', () => {
   });
 });
 describe('persistent failed evaluation', () => {
+  it('distinguishes provisional, appealed, confirmed-unchanged and changed results in the list', async () => {
+    const cases = [
+      { id: 'provisional', evaluation: score() },
+      { id: 'appealed', evaluation: { ...score(), appeals_total: 1, appeals_open: 1 } },
+      { id: 'confirmed', evaluation: { ...score(), appeals_total: 1, appeals_open: 0 } },
+      {
+        id: 'invalid',
+        evaluation: { ...score(), status: 'needs_review', gross_error_unknown: true },
+      },
+      {
+        id: 'changed',
+        evaluation: { ...score(90), original_total: 85, appeals_total: 1, appeals_open: 0 },
+      },
+    ];
+    const records = {
+      ...dataset(),
+      records: cases.map((item) => ({
+        ...dataset().records[0],
+        conversation_id: item.id,
+        evaluations: [{ ...item.evaluation, id: `ev-${item.id}` }],
+      })),
+    };
+    mocks.get.mockImplementation(async (path: string) => baseGet(path, () => records));
+    render(
+      <WorkspaceProvider>
+        <ConversationsPage />
+      </WorkspaceProvider>,
+    );
+    await screen.findByRole('link', { name: 'provisional' });
+    const row = (id: string) => screen.getByRole('link', { name: id }).closest('tr')!;
+    expect(within(row('provisional')).getByText('Предварительная оценка ИИ')).toBeVisible();
+    expect(within(row('appealed')).getByText('Оценка оспаривается')).toBeVisible();
+    expect(within(row('confirmed')).getByText('После пересмотра')).toBeVisible();
+    expect(within(row('confirmed')).getByText('85')).toBeVisible();
+    expect(within(row('changed')).getByText('После пересмотра')).toBeVisible();
+    expect(within(row('changed')).getByText('90')).toBeVisible();
+    expect(within(row('changed')).getByText('было 85')).toBeVisible();
+    expect(within(row('invalid')).getByText('Ответ модели требует проверки')).toBeVisible();
+    expect(within(row('invalid')).queryByText('Предварительная оценка ИИ')).not.toBeInTheDocument();
+    expect(mocks.post).not.toHaveBeenCalled();
+  });
   it('survives remount, keeps the old good score, and checks a lost response with the same request', async () => {
     const user = userEvent.setup();
     let records = dataset([score()], [failure]),

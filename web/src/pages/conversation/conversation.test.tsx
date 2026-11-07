@@ -1,9 +1,17 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
-import type { Conversation, Evaluation, EvaluationSummary } from '../../types';
+import type { Appeal, Conversation, Evaluation, EvaluationSummary } from '../../types';
 import EvaluationPane from './EvaluationPane';
 import TranscriptPane from './TranscriptPane';
-import { grossStatus, hashEvidence, scrollMessage, shownRecord, timestamp } from './helpers';
+import {
+  assessmentStage,
+  criterionAssessment,
+  grossStatus,
+  hashEvidence,
+  scrollMessage,
+  shownRecord,
+  timestamp,
+} from './helpers';
 
 const record: Conversation = {
   conversation_id: 'test-dialog',
@@ -160,7 +168,50 @@ const history: EvaluationSummary[] = [
   },
 ];
 
+function appeal(criterionId: string, action?: 'confirm' | 'change'): Appeal {
+  return {
+    id: `appeal-${criterionId}-${action || 'open'}`,
+    criterion_id: criterionId,
+    comment: 'Прошу пересмотреть конкретный критерий.',
+    status: action ? 'resolved' : 'open',
+    created_at: '2026-11-08T10:21:00Z',
+    disputed: { answer: 'NO', explanation: 'Исходный ответ ИИ.', evidence: [{ msg: 1 }] },
+    ...(action
+      ? {
+          decision: {
+            action,
+            answer: action === 'change' ? ('YES' as const) : null,
+            value: null,
+            reason: 'Рассмотрены указанные реплики.',
+            reviewer: 'Проверяющий',
+            decided_at: '2026-11-08T10:22:00Z',
+            total_before: 0,
+            total_after: 0,
+          },
+        }
+      : {}),
+  };
+}
+
 describe('conversation evidence and freshness', () => {
+  it('derives review stage from appeals rather than a changed total and gives open appeals precedence', () => {
+    const confirmed = appeal('contact', 'confirm');
+    expect(assessmentStage([])).toMatchObject({
+      id: 'preliminary',
+      label: 'Предварительная оценка ИИ',
+    });
+    expect(assessmentStage([confirmed])).toMatchObject({
+      id: 'reviewed',
+      label: 'Результат после пересмотра',
+      reviewedCriterionCount: 1,
+    });
+    expect(assessmentStage([confirmed, appeal('privacy')])).toMatchObject({
+      id: 'contested',
+      label: 'Оценка оспаривается',
+      openCount: 1,
+    });
+    expect(criterionAssessment([confirmed], 'privacy').id).toBe('preliminary');
+  });
   it('keeps unresolved flags unknown, including validation issues', () => {
     const evaluation = makeEvaluation();
     expect(grossStatus(evaluation)).toBe('clear');
@@ -225,6 +276,105 @@ describe('React conversation panels', () => {
       notify: vi.fn(),
     };
   }
+
+  it('presents an unappealed score as an AI proposal and explains how to contest a criterion', () => {
+    const { container } = render(<EvaluationPane {...evaluationProps()} />);
+    expect(screen.getByLabelText('Предварительная оценка ИИ: 0 из 100')).toBeInTheDocument();
+    const summary = container.querySelector('.conversation-score-description') as HTMLElement;
+    expect(
+      within(summary).getByText(/ИИ может ошибаться.*Оспорьте конкретный критерий/),
+    ).toBeVisible();
+    expect(container.querySelector('.conversation-score-ring span')).toHaveTextContent('из 100');
+    expect(container.querySelector('.conversation-score-ring')).not.toHaveTextContent('финальный');
+  });
+
+  it('shows a confirmed criterion as reviewed even when its answer and total stay unchanged', () => {
+    const evaluation = makeEvaluation();
+    evaluation.appeals = [appeal('contact', 'confirm')];
+    const snapshots = structuredClone({
+      original: evaluation.original_result,
+      final: evaluation.final_result,
+      criteria: evaluation.criteria,
+    });
+    const { container } = render(<EvaluationPane {...evaluationProps(evaluation)} />);
+    expect(screen.getByLabelText('Результат после пересмотра: 0 из 100')).toBeInTheDocument();
+    const cards = container.querySelectorAll('.conversation-criterion');
+    expect(within(cards[0] as HTMLElement).getByText('Рассмотрено проверяющим')).toBeVisible();
+    expect(within(cards[1] as HTMLElement).getByText('Предложение ИИ')).toBeVisible();
+    expect(
+      within(cards[0] as HTMLElement).getByText(/Проверяющий подтвердил ответ по этому критерию/),
+    ).toBeVisible();
+    const summary = container.querySelector('.conversation-score-description') as HTMLElement;
+    expect(
+      within(summary).getByText(/Рассмотрено критериев: 1 из 2.*Баллы сохранены/),
+    ).toBeVisible();
+    const printed = container.querySelector('.conversation-print-report') as HTMLElement;
+    expect(within(printed).getByText('Результат после пересмотра')).toBeInTheDocument();
+    expect(
+      within(printed).getByText('Рассмотрено проверяющим: ответ подтверждён.'),
+    ).toBeInTheDocument();
+    expect({
+      original: evaluation.original_result,
+      final: evaluation.final_result,
+      criteria: evaluation.criteria,
+    }).toEqual(snapshots);
+  });
+
+  it('keeps the overall score contested while another criterion already has a decision', () => {
+    const evaluation = makeEvaluation();
+    evaluation.appeals = [appeal('contact', 'confirm'), appeal('privacy')];
+    const { container } = render(<EvaluationPane {...evaluationProps(evaluation)} />);
+    expect(screen.getByLabelText('Оценка оспаривается: 0 из 100')).toBeInTheDocument();
+    const cards = container.querySelectorAll('.conversation-criterion');
+    expect(within(cards[0] as HTMLElement).getByText('Рассмотрено проверяющим')).toBeVisible();
+    expect(within(cards[1] as HTMLElement).getByText('Оспаривается')).toBeVisible();
+    const printed = container.querySelector('.conversation-print-report') as HTMLElement;
+    expect(within(printed).getByText('Оценка оспаривается')).toBeInTheDocument();
+    expect(within(printed).getByText(/Рассмотрено критериев: 1 из 2/)).toBeInTheDocument();
+  });
+
+  it('updates an open appeal to confirmed review from the server response without changing the score', () => {
+    const pending = makeEvaluation();
+    pending.appeals = [appeal('contact')];
+    const view = render(<EvaluationPane {...evaluationProps(pending)} />);
+    expect(screen.getByLabelText('Оценка оспаривается: 0 из 100')).toBeInTheDocument();
+    const confirmed = structuredClone(pending);
+    confirmed.appeals = [appeal('contact', 'confirm')];
+    view.rerender(<EvaluationPane {...evaluationProps(confirmed)} />);
+    expect(screen.getByLabelText('Результат после пересмотра: 0 из 100')).toBeInTheDocument();
+    const criterion = view.container.querySelector('.conversation-criterion') as HTMLElement;
+    expect(
+      within(criterion).getByText(/Проверяющий подтвердил ответ по этому критерию/),
+    ).toBeVisible();
+    expect(within(criterion).queryByText('На рассмотрении')).not.toBeInTheDocument();
+    expect(confirmed.final_result.total).toBe(pending.final_result.total);
+    expect(view.container.querySelector('.conversation-score-ring span')).toHaveTextContent(
+      'из 100',
+    );
+    const printed = view.container.querySelector('.conversation-print-report') as HTMLElement;
+    expect(
+      within(printed).getByText('Рассмотрено проверяющим: ответ подтверждён.'),
+    ).toBeInTheDocument();
+  });
+
+  it('marks a changed zero-weight flag as reviewed without requiring the numeric score to change', () => {
+    const evaluation = makeEvaluation();
+    evaluation.appeals = [appeal('privacy', 'change')];
+    Object.assign(evaluation.final_criteria.privacy, {
+      answer: 'YES',
+      changed_by_appeal: 'appeal-privacy-change',
+      reviewer_reason: 'Рассмотрены указанные реплики.',
+    });
+    evaluation.final_result = { ...score, gross_error: true, gross_error_criteria: ['privacy'] };
+    const { container } = render(<EvaluationPane {...evaluationProps(evaluation)} />);
+    expect(screen.getByLabelText('Результат после пересмотра: 0 из 100')).toBeInTheDocument();
+    expect(container.querySelector('.conversation-score-ring span')).toHaveTextContent('из 100');
+    expect(
+      within(container.querySelectorAll('.conversation-criterion')[1] as HTMLElement).getByText(
+        'Рассмотрено проверяющим',
+      ),
+    ).toBeVisible();
+  });
 
   it('opens criteria first and shows coaching on its own tab', () => {
     render(<EvaluationPane {...evaluationProps()} />);

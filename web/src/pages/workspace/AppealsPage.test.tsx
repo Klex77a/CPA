@@ -70,6 +70,50 @@ beforeEach(() => {
   mocks.post.mockResolvedValue({});
 });
 describe('appeal review', () => {
+  it('shows a confirmed criterion as reviewed even when its score did not change', async () => {
+    const user = userEvent.setup(),
+      original = mocks.get.getMockImplementation()!;
+    const resolved = {
+      ...appeal,
+      status: 'resolved',
+      decision: {
+        action: 'confirm',
+        reason: 'Ответ соответствует правилу.',
+        total_before: 85,
+        total_after: 85,
+      },
+    };
+    mocks.get.mockImplementation((path: string) =>
+      path === '/appeals' ? Promise.resolve([resolved]) : original(path),
+    );
+    render(<AppealsPage />);
+    await user.click(await screen.findByRole('button', { name: /Рассмотренные/ }));
+    expect(await screen.findByText('Ответ подтверждён')).toBeVisible();
+    expect(screen.getByText(/Текущий итог 85 → 85/)).toBeVisible();
+    expect(screen.getByText('Ответ соответствует правилу.')).toBeVisible();
+    expect(mocks.post).not.toHaveBeenCalled();
+  });
+  it('confirms an appealed answer with a reason without requiring a new score value or account', async () => {
+    const user = userEvent.setup();
+    render(<AppealsPage />);
+    const submit = await screen.findByRole('button', { name: 'Сохранить решение' });
+    expect(screen.getByText('Ожидает решения')).toBeInTheDocument();
+    await user.type(
+      screen.getByRole('textbox', { name: 'Обоснование решения' }),
+      'Сохранённый ответ соответствует правилу.',
+    );
+    await user.click(submit);
+    await waitFor(() =>
+      expect(mocks.post).toHaveBeenCalledWith('/evaluations/ev1/appeals/a1/decision', {
+        action: 'confirm',
+        reason: 'Сохранённый ответ соответствует правилу.',
+        reviewer: 'Проверяющий',
+      }),
+    );
+    expect(
+      screen.queryByRole('textbox', { name: /аккаунт|логин|эксперт/i }),
+    ).not.toBeInTheDocument();
+  });
   it('grounds an archived appeal in the saved source and links to 1-based proof turns', async () => {
     render(<AppealsPage />);
     await screen.findByText('Сохранённый ответ');

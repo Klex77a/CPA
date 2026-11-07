@@ -148,7 +148,7 @@ describe('background evaluation refresh in an open card', () => {
     await act(async () => {
       resolveHistory([summary(result)]);
     });
-    await screen.findByLabelText('Итоговая оценка 80 из 100');
+    await screen.findByLabelText('Предварительная оценка ИИ: 80 из 100');
     expect(screen.getByLabelText('Аудиозапись диалога')).toBe(audio);
     expect(audio.currentTime).toBe(37);
     expect(screen.getByRole('textbox', { name: 'Найти в диалоге' })).toHaveValue('ответ');
@@ -168,7 +168,7 @@ describe('background evaluation refresh in an open card', () => {
         evaluationId="historical"
       />,
     );
-    await screen.findByLabelText('Итоговая оценка 60 из 100');
+    await screen.findByLabelText('Предварительная оценка ИИ: 60 из 100');
     const requests = get.mock.calls.length;
     workspace.evaluationRevision = 2;
     view.rerender(
@@ -179,6 +179,6 @@ describe('background evaluation refresh in an open card', () => {
       />,
     );
     await waitFor(() => expect(get).toHaveBeenCalledTimes(requests));
-    expect(screen.getByLabelText('Итоговая оценка 60 из 100')).toBeInTheDocument();
+    expect(screen.getByLabelText('Предварительная оценка ИИ: 60 из 100')).toBeInTheDocument();
   });
 });

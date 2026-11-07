@@ -993,6 +993,50 @@
   font-weight: 700;
   margin-bottom: 12px;
 }
+.cqa-assessment-flow {
+  margin: 0;
+  padding-left: 19px;
+  color: #5c7665;
+}
+.cqa-assessment-flow li {
+  padding-left: 3px;
+  margin-bottom: 13px;
+}
+.cqa-assessment-flow strong {
+  font-size: 11px;
+  color: #345a40;
+}
+.cqa-assessment-flow li p {
+  margin-top: 4px;
+}
+.cqa-algorithm-diagnostics {
+  border-top: 1px solid var(--cqa-border);
+  padding: 15px 22px;
+  font-size: 11px;
+  color: #65806c;
+}
+.cqa-algorithm-diagnostics > summary {
+  cursor: pointer;
+  font-weight: 650;
+}
+.cqa-algorithm-diagnostics-body {
+  padding-top: 17px;
+  max-width: 820px;
+}
+.cqa-algorithm-diagnostics-body .cqa-benchmark-card {
+  padding-top: 16px;
+}
+.cqa-algorithm-diagnostics-body .cqa-benchmark-card h3 {
+  font-size: 13px;
+}
+.cqa-algorithm-diagnostics-body .cqa-benchmark-card p {
+  margin-top: 9px;
+  font-size: 11px;
+  line-height: 1.75;
+}
+.cqa-algorithm-diagnostics-body .cqa-benchmark-card .cqa-inline-tags {
+  margin-top: 12px;
+}
 .cqa-benchmark-card + .cqa-benchmark-card,
 .cqa-human-review-readiness {
   margin-top: 24px;

@@ -65,7 +65,32 @@ const report = (benchmark: BenchmarkStatus = regression): Readiness => ({
   demo: { total_seconds: 300, steps: [] },
 });
 beforeEach(() => mocks.get.mockReset());
+async function openDiagnostics() {
+  const user = userEvent.setup();
+  await user.click(await screen.findByText('Диагностика алгоритма'));
+}
 describe('readiness evidence', () => {
+  it('keeps the optional appeal workflow visible while algorithm diagnostics are collapsed', async () => {
+    mocks.get.mockResolvedValue(report());
+    render(<ReadinessPanel />);
+    const flow = await screen.findByRole('region', { name: 'Порядок оценки' });
+    expect(within(flow).getByText('Предварительная оценка ИИ')).toBeVisible();
+    expect(within(flow).getByText('Апелляция при несогласии')).toBeVisible();
+    expect(within(flow).getByText(/Это необязательный шаг/)).toBeVisible();
+    expect(within(flow).getByText(/Предварительная оценка доступна сразу/)).toBeVisible();
+    expect(screen.getByRole('link', { name: 'Открыть апелляции →' })).toHaveAttribute(
+      'href',
+      '#/appeals',
+    );
+    expect(screen.getByText('Диагностика алгоритма').closest('details')).not.toHaveAttribute(
+      'open',
+    );
+    expect(screen.getByText('99,17')).not.toBeVisible();
+    expect(screen.queryByRole('region', { name: 'Экспертная проверка' })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('link', { name: 'Открыть ручную разметку →' }),
+    ).not.toBeInTheDocument();
+  });
   it('keeps the raw 283/312 agreement visible with a disputed-reference warning and incomplete billing', async () => {
     const challenge: BenchmarkStatus = {
       ...regression,
@@ -94,6 +119,7 @@ describe('readiness evidence', () => {
     };
     mocks.get.mockResolvedValue({ ...report(), benchmarks: { regression, challenge } });
     render(<ReadinessPanel />);
+    await openDiagnostics();
     const section = await screen.findByRole('region', { name: 'Расширенные инженерные примеры' });
     expect(within(section).getByText('90,71')).toBeInTheDocument();
     expect(within(section).getByText(/283 из 312 ответов/)).toBeInTheDocument();
@@ -109,14 +135,15 @@ describe('readiness evidence', () => {
   it('retains measured engineering semantics from the legacy response while qualifying historical runtime', async () => {
     mocks.get.mockResolvedValue(report());
     render(<ReadinessPanel />);
+    await openDiagnostics();
     const section = await screen.findByRole('region', { name: 'Регрессионные примеры' });
     expect(within(section).getByText('99,17')).toBeInTheDocument();
     expect(within(section).getByText(/119 из 120 ответов/)).toBeInTheDocument();
     expect(within(section).getByText('Параметры выполнения не сверены')).toBeInTheDocument();
     expect(within(section).getByText(/не точность на DEV или PROD/)).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Открыть ручную разметку →' })).toHaveAttribute(
+    expect(screen.getByRole('link', { name: 'Открыть апелляции →' })).toHaveAttribute(
       'href',
-      '#/quality',
+      '#/appeals',
     );
   });
   it('shows a runtime change separately and presents challenge coverage without inventing measured accuracy', async () => {
@@ -139,6 +166,7 @@ describe('readiness evidence', () => {
     mocks.get.mockResolvedValue({ ...report(saved), benchmarks: { regression: saved, challenge } });
     const user = userEvent.setup();
     render(<ReadinessPanel />);
+    await openDiagnostics();
     const historical = await screen.findByRole('region', { name: 'Регрессионные примеры' });
     expect(within(historical).getByText('99,17')).toBeInTheDocument();
     expect(within(historical).getByText('Параметры выполнения отличаются')).toBeInTheDocument();
@@ -159,8 +187,8 @@ describe('readiness evidence', () => {
     expect(within(expanded).getByText('Ступени ведения диалога: 0 / 4 / 7 / 10.')).toBeVisible();
     expect(within(expanded).queryByText(/% совпадений/)).not.toBeInTheDocument();
     expect(within(expanded).queryByText('100')).not.toBeInTheDocument();
-    expect(screen.getByRole('region', { name: 'Экспертная проверка' })).toHaveTextContent(
-      'Не подтверждена',
+    expect(screen.getByRole('region', { name: 'Порядок оценки' })).toHaveTextContent(
+      'Это необязательный шаг',
     );
   });
   it('does not present metrics of an unverified run as a measured success', async () => {
@@ -173,6 +201,7 @@ describe('readiness evidence', () => {
     };
     mocks.get.mockResolvedValue(report(unverified));
     render(<ReadinessPanel />);
+    await openDiagnostics();
     const section = await screen.findByRole('region', { name: 'Регрессионные примеры' });
     expect(within(section).getByText('Прогон не подтверждён')).toBeInTheDocument();
     expect(within(section).queryByText('100')).not.toBeInTheDocument();

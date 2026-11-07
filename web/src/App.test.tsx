@@ -26,6 +26,15 @@ afterEach(() => {
 });
 
 describe('workspace navigation', () => {
+  it('keeps human annotation outside the application navigation and routes', async () => {
+    window.history.replaceState(null, '', '/#/quality');
+    render(<App />);
+    expect(await screen.findByRole('heading', { name: 'Список диалогов' })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Проверка качества' })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('heading', { name: 'Слепая разметка человеком' }),
+    ).not.toBeInTheDocument();
+  });
   it('traps mobile navigation focus and restores the opener after Escape', async () => {
     Object.defineProperty(window, 'innerWidth', { value: 720, configurable: true });
     const user = userEvent.setup();
@@ -37,7 +46,7 @@ describe('workspace navigation', () => {
     expect(close).toHaveFocus();
     expect(document.querySelector<HTMLElement>('.cqa-workspace')?.inert).toBe(true);
     await user.tab({ shift: true });
-    expect(screen.getByRole('link', { name: 'Проверка качества' })).toHaveFocus();
+    expect(screen.getByRole('link', { name: 'Чек-лист' })).toHaveFocus();
     await user.tab();
     expect(close).toHaveFocus();
     fireEvent.keyDown(document, { key: 'Escape' });

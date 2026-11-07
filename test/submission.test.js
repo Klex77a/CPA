@@ -43,6 +43,18 @@ test('dry-run validates without writing; official output preserves all source ID
   assert.deepEqual(output.results.map((row) => row.conversation_id), records.map((record) => record.conversation_id));
   assert.equal(inspectSubmission({ split: 'dev', root }).state, 'ready');
 });
+
+test('AI-only assessments export without expert annotations; appeals are optional and structural safeguards remain', () => {
+  const policy = getReadiness({ root }).assessment_policy;
+  assert.equal(policy.mode, 'ai_provisional_with_appeals');
+  assert.equal(policy.expert_review_required, false);
+  assert.equal(policy.appeals_optional, true);
+  assert.equal(policy.disputed_criterion_resolution, 'reviewer_confirm_or_change_with_reason');
+  assert.equal(policy.original_ai_assessment_preserved, true);
+  assert.equal(policy.structural_validation_required, true);
+  assert.equal(fs.existsSync(path.join(root, 'output', 'private')), false, 'no human annotation packet exists or is required');
+  assert.equal(prepareSubmission({ split: 'dev', groupId: 'DEV', root, dryRun: true }).errors, 0, 'valid AI-only results are exportable before any optional appeal');
+});
 test('changed results make the saved file stale; real error rows are retained', () => {
   const evaluation = store.read('evaluations', 'fixture-0');
   store.write('evaluations', evaluation.id, { ...evaluation, status: 'needs_review', validation_errors: ['proof requires review'] });

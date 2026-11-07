@@ -1,4 +1,15 @@
-import type { Answer, Criterion, Evaluation, EvaluationSummary } from './types';
+import type { Answer, Criterion, Evaluation, EvaluationSummary, EvaluationPhase } from './types';
+export function evaluationPhase(
+  value: Pick<EvaluationSummary, 'appeals_open' | 'appeals_total'>,
+): EvaluationPhase {
+  return value.appeals_open > 0 ? 'disputed' : value.appeals_total > 0 ? 'reviewed' : 'preliminary';
+}
+export const evaluationPhaseLabel = (phase: EvaluationPhase) =>
+  ({
+    preliminary: 'Предварительная оценка ИИ',
+    disputed: 'Оценка оспаривается',
+    reviewed: 'После пересмотра',
+  })[phase];
 export const formatNumber = (value: number | null | undefined, digits = 2) =>
   value == null || !Number.isFinite(value)
     ? '—'

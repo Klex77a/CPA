@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, apiUrl } from '../api';
 import { useResource } from '../hooks';
 import { useWorkspace } from '../Workspace';
+import { evaluationPhase, evaluationPhaseLabel } from '../format';
 import {
   evaluateWithRequest,
   evaluationActionLabel,
@@ -242,7 +243,10 @@ export default function ConversationsPage() {
   );
   return (
     <div className="cqa-workspace-page">
-      <PageHeader title="Диалоги" subtitle="Оценка качества общения с опорой на факты">
+      <PageHeader
+        title="Диалоги"
+        subtitle="Предварительная оценка ИИ, апелляции и текущий результат"
+      >
         <Button variant="secondary" onClick={() => setShowImport(true)}>
           Загрузить данные
         </Button>
@@ -418,7 +422,7 @@ export default function ConversationsPage() {
                     {sortHeading('Оператор', 'operator')}
                     <th>Канал / язык</th>
                     {sortHeading('Реплик', 'messages')}
-                    {sortHeading('Балл', 'total')}
+                    {sortHeading('Текущий балл', 'total')}
                     <th>Грубая ошибка</th>
                     <th>Статус</th>
                     <th aria-label="Действия" />
@@ -516,12 +520,22 @@ export default function ConversationsPage() {
                                 </small>
                               </details>
                             </>
-                          ) : e?.appeals_open ? (
-                            <StatusTag tone="warning">Апелляций: {e.appeals_open}</StatusTag>
-                          ) : e?.status === 'needs_review' ? (
-                            <StatusTag tone="warning">Проверить</StatusTag>
+                          ) : e && (e.status === 'needs_review' || e.gross_error_unknown) ? (
+                            <StatusTag tone="warning">Ответ модели требует проверки</StatusTag>
                           ) : e ? (
-                            <StatusTag tone="success">Готово</StatusTag>
+                            <>
+                              <StatusTag
+                                tone={
+                                  evaluationPhase(e) === 'disputed'
+                                    ? 'warning'
+                                    : evaluationPhase(e) === 'reviewed'
+                                      ? 'success'
+                                      : 'info'
+                                }
+                              >
+                                {evaluationPhaseLabel(evaluationPhase(e))}
+                              </StatusTag>
+                            </>
                           ) : (
                             <span className="cqa-cell-muted">Ожидает</span>
                           )}

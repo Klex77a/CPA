@@ -10,7 +10,6 @@ const DashboardPage = lazy(() => import('./pages/DashboardPage'));
 const AppealsPage = lazy(() => import('./pages/AppealsPage'));
 const ChecklistsPage = lazy(() => import('./pages/ChecklistsPage'));
 const OperatorPage = lazy(() => import('./pages/OperatorPage'));
-const QualityReviewPage = lazy(() => import('./pages/QualityReviewPage'));
 
 class PageBoundary extends Component<
   { children: ReactNode; route: string },
@@ -50,12 +49,6 @@ const navigation = [
     label: 'Чек-лист',
     icon: 'checklist' as const,
     description: 'Критерии оценки',
-  },
-  {
-    id: 'quality',
-    label: 'Проверка качества',
-    icon: 'shield' as const,
-    description: 'Независимая разметка',
   },
 ];
 
@@ -144,9 +137,6 @@ export default function App() {
       break;
     case 'appeals':
       page = <AppealsPage />;
-      break;
-    case 'quality':
-      page = <QualityReviewPage />;
       break;
     case 'checklists':
     case 'checklist':

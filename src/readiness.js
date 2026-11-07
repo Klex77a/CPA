@@ -159,6 +159,15 @@ function getReadiness({ root = cfg.ROOT } = {}) {
   const challenge = inspectBenchmark({ root, suite: 'challenge' });
   return {
     generated_at: new Date().toISOString(),
+    assessment_policy: {
+      mode: 'ai_provisional_with_appeals',
+      expert_review_required: false,
+      appeals_optional: true,
+      disputed_criterion_resolution: 'reviewer_confirm_or_change_with_reason',
+      original_ai_assessment_preserved: true,
+      structural_validation_required: true,
+      description: 'ИИ предоставляет предварительную оценку. Пользователь может оспорить критерий; проверяющий подтверждает или меняет его с указанием причины. Независимая экспертная комиссия для получения оценки и экспорта не требуется.',
+    },
     benchmark: regression,
     benchmarks: { regression, challenge },
     submissions: ['dev', 'prod'].map((split) => inspectSubmission({ split, root })),

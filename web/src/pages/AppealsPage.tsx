@@ -115,7 +115,7 @@ function AppealDetail({ appeal, onSaved }: { appeal: Appeal; onSaved: () => void
             : {}),
         },
       );
-      notify('Решение сохранено. Итог диалога пересчитан.', 'success');
+      notify('Решение сохранено. Текущий итог обновлён.', 'success');
       onSaved();
     } catch (cause) {
       setFormError(errorMessage(cause));
@@ -129,7 +129,7 @@ function AppealDetail({ appeal, onSaved }: { appeal: Appeal; onSaved: () => void
         <div>
           <div className="cqa-inline-tags">
             <StatusTag tone={appeal.status === 'open' ? 'warning' : 'success'}>
-              {appeal.status === 'open' ? 'Открыта' : 'Рассмотрена'}
+              {appeal.status === 'open' ? 'Ожидает решения' : 'Решение сохранено'}
             </StatusTag>
             <span className="cqa-cell-muted">{appeal.group_id}</span>
           </div>
@@ -139,7 +139,7 @@ function AppealDetail({ appeal, onSaved }: { appeal: Appeal; onSaved: () => void
           </a>
         </div>
         <div className="cqa-appeal-total">
-          <span>Итог диалога</span>
+          <span>Текущий итог</span>
           <ScoreValue value={appeal.final_total} />
         </div>
       </div>
@@ -154,7 +154,7 @@ function AppealDetail({ appeal, onSaved }: { appeal: Appeal; onSaved: () => void
           <>
             <div className="cqa-appeal-review-grid">
               <div className="cqa-appeal-position">
-                <SectionTitle title="Спорная оценка" />
+                <SectionTitle title="Оспариваемый ответ" />
                 <div className="cqa-inline-tags">
                   <StatusTag tone={appeal.disputed.answer === 'INVALID' ? 'warning' : 'neutral'}>
                     {answerText(criterion, appeal.disputed)}
@@ -303,7 +303,7 @@ function AppealDetail({ appeal, onSaved }: { appeal: Appeal; onSaved: () => void
                   </p>
                 )}
                 <div className="cqa-form-footer">
-                  <span>Сохранённое решение пересчитает финальный балл.</span>
+                  <span>Подтверждение сохранит балл, изменение пересчитает текущий итог.</span>
                   <Button type="submit" variant="primary" loading={saving}>
                     Сохранить решение
                   </Button>
@@ -313,12 +313,12 @@ function AppealDetail({ appeal, onSaved }: { appeal: Appeal; onSaved: () => void
               <div className="cqa-resolved-decision">
                 <StatusTag tone="success">
                   {appeal.decision?.action === 'confirm'
-                    ? 'Оценка подтверждена'
-                    : `Изменено: ${answerText(criterion, appeal.decision || { answer: 'INVALID' })}`}
+                    ? 'Ответ подтверждён'
+                    : `Ответ изменён: ${answerText(criterion, appeal.decision || { answer: 'INVALID' })}`}
                 </StatusTag>
                 <p>{appeal.decision?.reason}</p>
                 <strong>
-                  Итог {number(appeal.decision?.total_before)} →{' '}
+                  Текущий итог {number(appeal.decision?.total_before)} →{' '}
                   {number(appeal.decision?.total_after)}
                 </strong>
               </div>
@@ -355,12 +355,19 @@ export default function AppealsPage() {
   const open = appeals?.filter((appeal) => appeal.status === 'open').length || 0;
   return (
     <div className="cqa-workspace-page">
-      <PageHeader title="Апелляции" subtitle="Спорная оценка, доказательства и прозрачное решение">
+      <PageHeader
+        title="Апелляции"
+        subtitle="Необязательный пересмотр оценки: подтверждение или изменение с причиной"
+      >
         <Button variant="secondary" onClick={reload}>
           Обновить
         </Button>
       </PageHeader>
       <div className="cqa-page-scroll cqa-workspace-content">
+        <p className="cqa-cell-muted">
+          Предварительная оценка доступна сразу. Если вы не согласны с критерием, подайте апелляцию;
+          проверяющий подтвердит или изменит ответ с причиной.
+        </p>
         <div className="cqa-appeals-toolbar">
           <div className="cqa-filter-chips">
             <button

@@ -1,6 +1,7 @@
 export type Speaker = 'operator' | 'client' | 'bot' | 'system';
 export type AnswerValue = 'YES' | 'NO' | 'NA' | 'SCORE' | 'INVALID';
 export type Tone = 'success' | 'warning' | 'danger' | 'neutral' | 'info';
+export type EvaluationPhase = 'preliminary' | 'disputed' | 'reviewed';
 export interface Criterion {
   id: string;
   code?: string;

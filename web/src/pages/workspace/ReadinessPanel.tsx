@@ -210,8 +210,8 @@ export default function ReadinessPanel() {
   return (
     <section className="cqa-data-panel cqa-readiness-panel">
       <SectionTitle
-        title="Качество и готовность к сдаче"
-        description="Инженерные измерения, ручная проверка и итоговые файлы"
+        title="Результаты и апелляции"
+        description="Предварительная оценка ИИ, необязательный пересмотр и итоговые файлы"
       >
         <a className="cqa-text-link" href={apiUrl('/demo-guide')}>
           План защиты ↓
@@ -228,34 +228,34 @@ export default function ReadinessPanel() {
           <>
             <div className="cqa-readiness-columns">
               <div>
-                {regression && (
-                  <BenchmarkCard
-                    title="Регрессионные примеры"
-                    status={regression}
-                    download={apiUrl('/benchmark/report')}
-                  />
-                )}
-                <BenchmarkCard
-                  title="Расширенные инженерные примеры"
-                  status={
-                    challenge || {
-                      state: 'not_run',
-                      quality_state: 'not_run',
-                      message: 'Расширенный набор пока не измерен.',
-                    }
-                  }
-                />
-                <section className="cqa-human-review-readiness" aria-label="Экспертная проверка">
-                  <div className="cqa-inline-between">
-                    <h3>Экспертная проверка</h3>
-                    <StatusTag tone="warning">Не подтверждена</StatusTag>
-                  </div>
+                <section aria-label="Порядок оценки">
+                  <h3>От оценки ИИ к текущему результату</h3>
+                  <ol className="cqa-assessment-flow">
+                    <li>
+                      <strong>Предварительная оценка ИИ</strong>
+                      <p>Модель предлагает ответы по критериям, баллы и реплики-доказательства.</p>
+                    </li>
+                    <li>
+                      <strong>Апелляция при несогласии</strong>
+                      <p>
+                        Это необязательный шаг: выберите критерий и объясните, что вызывает
+                        сомнение.
+                      </p>
+                    </li>
+                    <li>
+                      <strong>Решение в приложении</strong>
+                      <p>
+                        Проверяющий подтверждает или изменяет оспариваемый ответ с причиной. Текущий
+                        итог пересчитывается, история сохраняется.
+                      </p>
+                    </li>
+                  </ol>
                   <p>
-                    Реальная независимая разметка и согласование результатов ещё не подтверждены.
-                    Наличие формы не означает, что проверка пройдена.
+                    Предварительная оценка доступна сразу. Если вы не согласны с критерием, подайте
+                    апелляцию; проверяющий подтвердит или изменит ответ с причиной.
                   </p>
-                  <a className="cqa-text-link" href="#/quality">
-                    Открыть ручную разметку →
+                  <a className="cqa-text-link" href="#/appeals">
+                    Открыть апелляции →
                   </a>
                 </section>
               </div>
@@ -288,6 +288,32 @@ export default function ReadinessPanel() {
                 <p className="cqa-method-note">{report.publication.message}</p>
               </div>
             </div>
+            <details className="cqa-algorithm-diagnostics">
+              <summary>Диагностика алгоритма</summary>
+              <div className="cqa-algorithm-diagnostics-body">
+                <p className="cqa-method-note">
+                  Технические измерения помогают улучшать алгоритм и не добавляют обязательного
+                  этапа к обработке диалога.
+                </p>
+                {regression && (
+                  <BenchmarkCard
+                    title="Регрессионные примеры"
+                    status={regression}
+                    download={apiUrl('/benchmark/report')}
+                  />
+                )}
+                <BenchmarkCard
+                  title="Расширенные инженерные примеры"
+                  status={
+                    challenge || {
+                      state: 'not_run',
+                      quality_state: 'not_run',
+                      message: 'Расширенный набор пока не измерен.',
+                    }
+                  }
+                />
+              </div>
+            </details>
             <details className="cqa-demo-details">
               <summary>Сценарий защиты · {report.demo.total_seconds / 60} минут</summary>
               <ol>
