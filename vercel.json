@@ -1,11 +1,12 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": null,
-  "outputDirectory": "public",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
   "functions": {
     "api/index.js": {
       "maxDuration": 180,
-      "includeFiles": "{server.js,src/**,public/**,docs/DEMO_SCRIPT.md,docs/benchmark-results/latest.json,test/fixtures/benchmark-cases.json,results/**}"
+      "includeFiles": "{server.js,src/**,dist/**,docs/DEMO_SCRIPT.md,docs/benchmark-results/latest.json,test/fixtures/benchmark-cases.json,results/**}"
     }
   },
   "routes": [

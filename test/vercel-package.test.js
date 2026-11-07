@@ -11,9 +11,12 @@ const { spawnSync } = require('node:child_process');
 const root = path.join(__dirname, '..');
 const config = JSON.parse(fs.readFileSync(path.join(root, 'vercel.json'), 'utf8'));
 assert.equal(config.framework, null);
+assert.equal(config.buildCommand, 'npm run build', 'the deployment must compile the React application');
+assert.equal(config.outputDirectory, 'dist');
+assert.ok(config.functions['api/index.js'].includeFiles.includes('dist/**'), 'the protected function must contain the compiled assets');
 assert.ok(config.functions['api/index.js'].maxDuration <= 180);
 assert.ok(!config.routes.some((route) => route.handle === 'filesystem'), 'static files must not bypass the protected handler');
-for (const url of ['/', '/index.html', '/cqa.js', '/assets/freedom-mark.svg', '/demo-sample.json', '/api/config', '/api/batch/job/step', '/results/dev/results.json', '/.env']) {
+for (const url of ['/', '/index.html', '/assets/index-example.js', '/assets/index-example.css', '/assets/freedom-mark.svg', '/demo-sample.json', '/api/config', '/api/batch/job/step', '/results/dev/results.json', '/.env']) {
   const route = config.routes.find((item) => item.src && new RegExp('^(?:' + item.src + ')$').test(url));
   assert.equal(route?.dest, '/api/index', url + ' must pass through the same authenticated handler');
 }
@@ -34,8 +37,9 @@ const initialized = git('init', '--quiet');
 assert.equal(initialized.status, 0, initialized.stderr);
 fs.writeFileSync(path.join(sandbox, '.gitignore'), fs.readFileSync(path.join(root, '.vercelignore')));
 const allowed = [
-  'package.json', 'package-lock.json', 'vercel.json', 'server.js', 'api/index.js',
-  'src/config.js', 'src/cloud-store.js', 'public/index.html', 'public/assets/manrope.css',
+  'package.json', 'package-lock.json', 'vercel.json', 'vite.config.mts', 'server.js', 'api/index.js',
+  'src/config.js', 'src/cloud-store.js', 'public/assets/manrope.css',
+  'web/index.html', 'web/tsconfig.json', 'web/src/main.tsx', 'web/src/pages/CardPage.tsx',
   'docs/DEMO_SCRIPT.md', 'docs/benchmark-results/latest.json',
   'test/fixtures/benchmark-cases.json', 'results/dev/results.json', 'results/prod/results.json',
 ];
@@ -60,6 +64,8 @@ const privatePaths = [
   'src/.env.local', 'src/state.tmp', 'node_modules/pg/package.json',
   'test/fixtures/unreviewed.json', 'docs/benchmark-results/baseline.json', 'results/dev/private-copy.json',
   'public/node_modules/private.js', 'src/.vercel/auth.json', 'public/.cache/private.json',
+  'web/.env.local', 'web/src/.env', 'web/node_modules/private.js', 'web/.cache/private.json',
+  'dist/assets/stale-local-build.js',
 ];
 for (const relative of [...allowed, ...privatePaths]) {
   const location = path.join(sandbox, relative);

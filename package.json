@@ -4,9 +4,19 @@
   "description": "Conversation Quality Analytics — оценка качества диалогов операторов (хакатон Freedom Broker)",
   "main": "server.js",
   "scripts": {
+    "prestart": "npm run build",
     "start": "node server.js",
+    "predemo": "npm run build",
     "demo": "node -e \"process.env.LLM_PROVIDER='mock';require('./server.js').server.listen(process.env.PORT||3000,'127.0.0.1',()=>console.log('ДЕМО: http://localhost:'+(process.env.PORT||3000)))\"",
-    "check": "node scripts/check-syntax.js",
+    "dev": "vite --config vite.config.mts",
+    "dev:api": "node server.js",
+    "build": "npm run typecheck && vite build --config vite.config.mts",
+    "typecheck": "tsc --project web/tsconfig.json --noEmit",
+    "check": "node scripts/check-syntax.js && npm run typecheck",
+    "test:ui": "vitest run --config vite.config.mts",
+    "format:web": "prettier --write \"web/**/*.{ts,tsx,css,html,json}\" vite.config.mts",
+    "format:check": "prettier --check \"web/**/*.{ts,tsx,css,html,json}\" vite.config.mts",
+    "pretest": "npm run build",
     "validate:results": "node scripts/validate-results.js",
     "benchmark": "node scripts/benchmark.js",
     "benchmark:live": "node scripts/benchmark.js --live --out output/benchmark/latest.json",
@@ -14,13 +24,29 @@
     "prepare:results": "node scripts/prepare-results.js",
     "check:readiness": "node scripts/check-readiness.js",
     "migrate:workspace": "node scripts/migrate-workspace.js",
-    "test": "node test/scoring.test.js && node test/validation.test.js && node test/pipeline.test.js && node test/deepseek.test.js && node test/results.test.js && node test/hardening.test.js && node test/export.test.js && node test/audio-access.test.js && node test/evaluation-failure.test.js && node test/appeals-concurrency.test.js && node test/freshness.test.js && node test/analytics.test.js && node test/frontend.test.js && node test/batch-selection.test.js && node test/core-review.test.js && node test/benchmark.test.js && node test/submission.test.js && node test/dataset-runner.test.js && node test/cloud-store.test.js && node test/cloud-batch.test.js && node test/hosting.test.js && node test/vercel-package.test.js && node test/workspace-transfer.test.js"
+    "test": "node test/scoring.test.js && node test/validation.test.js && node test/pipeline.test.js && node test/deepseek.test.js && node test/results.test.js && node test/hardening.test.js && node test/export.test.js && node test/audio-access.test.js && node test/evaluation-failure.test.js && node test/appeals-concurrency.test.js && node test/freshness.test.js && node test/analytics.test.js && node test/batch-selection.test.js && node test/core-review.test.js && node test/benchmark.test.js && node test/submission.test.js && node test/dataset-runner.test.js && node test/cloud-store.test.js && node test/cloud-batch.test.js && node test/hosting.test.js && node test/vercel-package.test.js && node test/workspace-transfer.test.js && npm run test:ui"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.12.0"
   },
   "license": "MIT",
   "dependencies": {
-    "pg": "^8.23.1"
+    "pg": "^8.23.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "7.0.1",
+    "@testing-library/react": "16.3.3",
+    "@testing-library/user-event": "14.6.8",
+    "@types/node": "24.19.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.2.1",
+    "jsdom": "27.4.0",
+    "prettier": "3.9.10",
+    "typescript": "6.0.3",
+    "vite": "8.3.6",
+    "vitest": "4.1.12"
   }
 }

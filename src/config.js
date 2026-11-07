@@ -51,7 +51,7 @@ module.exports = {
   ACCESS_USERNAME: env.CQA_ACCESS_USERNAME || 'midnight',
   ACCESS_PASSWORD: env.CQA_ACCESS_PASSWORD || '',
   DATA_DIR: process.env.CQA_DATA_DIR || path.join(ROOT, 'data'),
-  PUBLIC_DIR: path.join(ROOT, 'public'),
+  PUBLIC_DIR: fs.existsSync(path.join(ROOT, 'dist', 'index.html')) ? path.join(ROOT, 'dist') : path.join(ROOT, 'public'),
   CORS_ORIGINS: (env.CORS_ORIGINS || '').split(',').map((value) => value.trim()).filter(Boolean),
   HOST: (env.HOST || '').trim() || (cloudMode ? '0.0.0.0' : '127.0.0.1'),
   PORT: numSetting(env.PORT, 3000, 0, 65535, true),

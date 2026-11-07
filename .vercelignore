@@ -4,6 +4,8 @@
 !api
 !public
 !src
+!web
+!vite.config.mts
 !server.js
 !package.json
 !package-lock.json

@@ -28,6 +28,8 @@ jobs:
           package-manager-cache: false
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run check
+      - run: npm run format:check
+      # npm test compiles the React application through its pretest hook.
       - run: npm test
       - run: npm run benchmark
       - name: Validate saved DEV submission

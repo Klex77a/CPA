@@ -34,7 +34,7 @@ async function test(name, callback) { await callback(); passed++; console.log('â
       for (const invalid of [null, 'Bearer x', 'Basic invalid!', auth + 'x']) assert.equal(credentialsMatch(invalid, 'midnight', cfg.ACCESS_PASSWORD), false);
       await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
       const base = `http://127.0.0.1:${server.address().port}`;
-      for (const uri of ['/', '/cqa.js', '/api/config', '/api/datasets']) {
+      for (const uri of ['/', '/assets/index-example.js', '/api/config', '/api/datasets']) {
         const response = await fetch(base + uri, { headers: { host: headers.host } });
         assert.equal(response.status, 401);
         assert.match(response.headers.get('www-authenticate'), /Midnight Commit/);
@@ -46,7 +46,18 @@ async function test(name, callback) { await callback(); passed++; console.log('â
     });
     await test('authenticated static assets and HTTPS origin work; foreign origins remain blocked', async () => {
       const base = `http://127.0.0.1:${server.address().port}`;
-      assert.equal((await fetch(base + '/', { headers })).status, 200);
+      const page = await fetch(base + '/', { headers });
+      assert.equal(page.status, 200);
+      const html = await page.text();
+      assert.equal(cfg.PUBLIC_DIR, path.join(cfg.ROOT, 'dist'), 'run npm run build before the hosting checks');
+      const entry = html.match(/<script\b[^>]*\btype="module"[^>]*\bsrc="([^"]+)"/);
+      assert.ok(entry, 'the server must serve the compiled React entry');
+      assert.match(entry[1], /^\/assets\/.+\.js$/);
+      const bundle = await fetch(base + entry[1], { headers });
+      assert.equal(bundle.status, 200);
+      assert.match(bundle.headers.get('content-type'), /javascript/);
+      assert.ok((await bundle.text()).length > 100, 'the client bundle must contain compiled code');
+      assert.equal((await fetch(base + entry[1], { headers: { host: headers.host } })).status, 401, 'compiled assets retain the same authentication boundary');
       assert.equal(requests, 0, 'static rendering uses no workspace connection');
       const response = await fetch(base + '/api/config', { headers: { ...headers, origin: 'https://' + new URL(base).host } });
       assert.equal(response.status, 200);
