@@ -1,6 +1,7 @@
 import { api } from '../api';
 import { useResource } from '../hooks';
 import { useWorkspace } from '../Workspace';
+import { costIsComplete, knownCost } from '../format';
 import { Button, ErrorState, PageHeader, Spinner } from '../components/ui';
 import type { Analytics } from './workspace/models';
 import { cardHref, number, operatorHref } from './workspace/logic';
@@ -113,8 +114,18 @@ export default function DashboardPage() {
               />
               <Stat
                 label="Стоимость оценки"
-                value={`$${number(a.cost_usd, 4)}`}
-                detail={`≈ $${number(a.cost_usd / a.evaluated, 4)} за диалог`}
+                value={
+                  costIsComplete(a)
+                    ? `$${number(a.cost_usd, 4)}`
+                    : knownCost(a)
+                      ? `≥ $${number(knownCost(a), 4)}`
+                      : 'Неизвестно'
+                }
+                detail={
+                  costIsComplete(a)
+                    ? `≈ $${number(a.cost_usd! / a.evaluated, 4)} за диалог`
+                    : 'Полный расход неизвестен'
+                }
               />
             </div>
             <div className="cqa-insight-panel">

@@ -8,7 +8,7 @@ const path = require('node:path');
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cqa-failures-'));
 Object.assign(process.env, { CQA_DATA_DIR: dataDir, LLM_PROVIDER: 'deepseek', DEEPSEEK_API_KEY: 'test-key-never-use-123', LLM_MODEL: 'actual-test-model' });
 const store = require('../src/store');
-const { saveEvaluationFailure, safeFailureMessage } = require('../src/evaluation-failure');
+const { saveEvaluationFailure, safeFailureMessage, currentFailureSummaries } = require('../src/evaluation-failure');
 const record = { conversation_id: 'same', transcript: [{ timestamp: '2026-11-07T10:00:00Z', speaker: 'client', text: 'Вопрос' }] };
 const checklist = { id: 'default', version: 3 };
 let providerCalls = 0;
@@ -47,7 +47,24 @@ try {
   console.log('✔ ошибки очищаются от ключей и подписей URL и ограничены по длине');
 
   assert.strictEqual(providerCalls, 0);
-  console.log('evaluation-failure: пройдено 3');
+  const typed = { ...record, channel: 'agent chat', language: 'RU' };
+  const rules = { ...checklist, name: 'Current rules', criteria: [{ id: 'one', type: 'binary', description: 'Current description' }] };
+  const first = saveEvaluationFailure(typed, rules, 'DEV', new Error(secretMessage), { created_at: '2026-11-08T00:00:01Z' });
+  const current = (failures, evaluations = [], source = typed, selected = rules) => currentFailureSummaries(source, failures, evaluations, [selected]);
+  const summary = current([first]);
+  assert.strictEqual(summary.length, 1); assert.strictEqual(summary[0].status, 'error');
+  assert.strictEqual(summary[0].created_at, first.created_at); assert.deepStrictEqual(summary[0].checklist, checklist);
+  assert.ok(!JSON.stringify(summary).includes('auth-secret')); assert.ok(!JSON.stringify(summary).includes('signed-value'));
+  assert.ok(!('timing' in summary[0]) && !('transcript_hash' in summary[0]));
+  const good = { ...first, id: 'good', status: 'ok', checklist: { ...first.checklist, content_hash: first.checklist_hash }, created_at: '2026-11-08T00:00:02Z' };
+  assert.deepStrictEqual(current([first], [good]), []);
+  const retry = saveEvaluationFailure(typed, rules, 'DEV', new Error('Latest timeout'), { created_at: '2026-11-08T00:00:03Z' });
+  assert.strictEqual(current([first, retry], [good])[0].id, retry.id, 'a failed retry remains visible alongside the earlier good score');
+  for (const source of [{ ...typed, language: 'KZ' }, { ...typed, channel: 'voice call' }, { ...typed, transcript: [{ ...typed.transcript[0], text: 'New source' }] }]) assert.deepStrictEqual(current([retry], [], source), []);
+  for (const selected of [{ ...rules, version: 4 }, { ...rules, criteria: [{ ...rules.criteria[0], description: 'Changed without a version bump' }] }]) assert.deepStrictEqual(current([retry], [], typed, selected), []);
+  assert.deepStrictEqual(current([{ ...retry, checklist_hash: undefined }]), [], 'unverifiable legacy failures must not be rebound to current rules');
+  console.log('✔ сводка показывает только последнюю текущую ошибку, очищает секреты и скрывает её после более нового анализа');
+  console.log('evaluation-failure: пройдено 4');
 } finally {
   fs.rmSync(dataDir, { recursive: true, force: true });
 }

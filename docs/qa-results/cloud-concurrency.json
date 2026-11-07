@@ -1,0 +1,25 @@
+{
+  "kind": "cqa_disposable_postgres_concurrency_check",
+  "schema_version": "1.0",
+  "generated_at": "2026-11-07T22:45:48.262Z",
+  "mode": "live",
+  "ok": true,
+  "phase": "verified",
+  "real_postgres": true,
+  "provider_requests": 0,
+  "synthetic_evaluations": 2,
+  "mutation_while_model_waits_ms": 884,
+  "cancel_while_model_waits_ms": 882,
+  "disposable_workspace_removed": true,
+  "source_hashes": {
+    "scripts/check-cloud-concurrency.js": "6f93445abcc38ab74ba4424a2dc45218e68ffe2385900c4f2e99c0e6bb2bab47",
+    "src/cloud-store.js": "ab95a23b9ca8ed966beb1dadf7a744c1dcba0f2a76f1f9068f65a9078e66406f",
+    "src/cloud-evaluation.js": "76cf36c9d445f4f5669b9dcd4c06fa46461ba1950ac26ff199b88e3141448e16",
+    "src/cloud-batch.js": "f53e8a695fb328cfc89fa722c828d4e404fd26f83109429f1390550b8ccd0528",
+    "src/store.js": "0dc910b2c80e40ddaa195a0451f7a99f315420bb0505da33287b76a55d6ee2cb"
+  },
+  "limitations": [
+    "Uses synthetic deferred evaluation; provider latency, billing and model quality are not tested.",
+    "Checks one disposable workspace; production conversations and scores are not modified."
+  ]
+}

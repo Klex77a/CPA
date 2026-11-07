@@ -87,6 +87,26 @@ class FakePool {
 let passed = 0;
 const test = async (name, run) => { await run(); passed++; console.log('✔', name); };
 
+async function operationHarness() {
+  const pool = new FakePool();
+  const run = createCloudStore({ pool });
+  const transact = (callback) => run({}, callback);
+  const records = [0, 1].map((index) => ({ conversation_id: `slow-${index}`, channel: 'agent chat', language: 'RU', transcript: [{ timestamp: '00:00', speaker: 'client', text: `Synthetic ${index}` }] }));
+  const checklist = clone(defaultChecklist);
+  await transact(() => store.write('datasets', 'OPERATIONS', { group_id: 'OPERATIONS', records }));
+  let clock = Date.parse('2026-11-08T00:00:00Z'), calls = 0;
+  const pendingResults = new Map();
+  const started = defer(), release = defer();
+  const evaluate = async (record, selected, group, options) => {
+    calls++; assert.equal(pool.locks.size, 0, 'model work must not hold any workspace row lock');
+    started.resolve(); await release.promise;
+    return { id: `paid-result-${calls}`, group_id: group, conversation_id: record.conversation_id, cache_key: cacheKey(record, selected), transcript_hash: transcriptHash(record.transcript), channel: record.channel, language: record.language, record_snapshot: clone(record), checklist_snapshot: clone(selected), checklist: { id: selected.id, version: selected.version }, status: 'ok', created_at: new Date(clock).toISOString(), cost_usd: 0.003, duration_ms: 123, appeals: [], operation_id: options.operation_id };
+  };
+  const dependencies = { store, transact, evaluate, cacheKey, now: () => clock, leaseMs: 1000, pendingResults };
+  const create = (overrides = {}) => require('../src/cloud-evaluation').createCloudEvaluation({ ...dependencies, ...overrides });
+  return { pool, run, transact, records, checklist, started, release, dependencies, create, pendingResults, calls: () => calls, advance: (ms) => { clock += ms; } };
+}
+
 (async () => {
   await test('cloud mode never creates local directories or falls back outside a request', () => {
     assert.equal(store.cloudMode, true);
@@ -262,6 +282,125 @@ const test = async (name, run) => { await run(); passed++; console.log('✔', na
     pool.rows.get('midnight-commit').payload = { jobs: [] };
     await assert.rejects(run({ readOnly: true }, () => store.list('jobs')), (error) => error.status === 503);
     assert.equal(fs.existsSync(process.env.CQA_DATA_DIR), false);
+  });
+  await test('external evaluation releases the row lock; edits and appeals survive finalization and duplicate requests do not pay twice', async () => {
+    const h = await operationHarness();
+    await h.transact(() => store.write('evaluations', 'existing', { id: 'existing', appeals: [] }));
+    const body = { group_id: 'OPERATIONS', conversation_id: 'slow-0', request_id: 'same-request', force: true };
+    const work = h.create().perform(body);
+    await h.started.promise;
+    await assert.rejects(h.create().perform(body), (error) => error.status === 409);
+    assert.equal(h.calls(), 1);
+    await h.transact(() => {
+      const old = store.read('evaluations', 'existing'); old.appeals.push({ id: 'accepted-during-model', status: 'resolved' }); store.write('evaluations', old.id, old);
+      const current = store.read('checklists', 'default'); current.version++; current.criteria[0].title = 'Edited during model'; store.write('checklists', current.id, current);
+      const dataset = store.read('datasets', 'OPERATIONS'); dataset.records[0].transcript[0].text = 'Reimported during model'; store.write('datasets', dataset.group_id, dataset);
+    });
+    h.release.resolve(); const result = await work;
+    assert.equal(result.checklist.version, h.checklist.version);
+    assert.equal(result.record_snapshot.transcript[0].text, 'Synthetic 0');
+    await assert.rejects(h.create().perform(body), (error) => error.code === 'EVALUATION_INPUT_CHANGED', 'a changed source/rules cannot be returned as the old operation outcome');
+    assert.equal(h.calls(), 1);
+    await h.run({ readOnly: true }, () => {
+      assert.equal(store.read('evaluations', 'existing').appeals.length, 1);
+      assert.equal(store.read('checklists', 'default').criteria[0].title, 'Edited during model');
+      assert.equal(store.read('datasets', 'OPERATIONS').records[0].transcript[0].text, 'Reimported during model');
+      assert.ok(store.read('evaluations', result.id));
+    });
+    assert.equal(h.pool.locks.size, 0);
+  });
+
+  await test('completed forced operations replay across worker instances without another paid call', async () => {
+    const h = await operationHarness(); h.release.resolve();
+    const body = { group_id: 'OPERATIONS', conversation_id: 'slow-0', request_id: 'durable-replay', force: true };
+    const first = await h.create().perform(body);
+    const second = await h.create({ pendingResults: new Map() }).perform(body);
+    assert.equal(second.id, first.id); assert.equal(second.cached, true); assert.equal(h.calls(), 1);
+    await assert.rejects(h.create().perform({ ...body, force: false }), (error) => error.code === 'EVALUATION_INPUT_CHANGED');
+    await assert.rejects(h.create().perform({ ...body, conversation_id: 'slow-1' }), (error) => error.code === 'EVALUATION_INPUT_CHANGED');
+    await h.transact(() => store.write('checklists', 'another', { ...h.checklist, id: 'another' }));
+    await assert.rejects(h.create().perform({ ...body, checklist_id: 'another' }), (error) => error.code === 'EVALUATION_INPUT_CHANGED');
+    assert.equal(h.calls(), 1);
+    const cachedBody = { ...body, request_id: 'cached-read', force: false };
+    await h.create().perform(cachedBody);
+    await assert.rejects(h.create().perform({ ...cachedBody, force: true }), (error) => error.code === 'EVALUATION_INPUT_CHANGED', 'cached operations also bind their original intent');
+  });
+
+  await test('pending paid results are bounded and expire without automatic rebilling; durable replay clears acknowledged results', async () => {
+    const h = await operationHarness(); h.release.resolve();
+    const service = h.create({ pendingLimit: 1, pendingTtlMs: 20 });
+    const claim = (index) => h.transact(() => service.claim({ record: h.records[index], checklist: h.checklist, groupId: 'OPERATIONS', force: true, requestId: `memory-${index}` }));
+    const first = await claim(0); await service.execute(first.task);
+    const second = await claim(1); await service.execute(second.task);
+    assert.equal(h.pendingResults.size, 1); assert.equal(service.pending(first.task.id), undefined);
+    h.advance(21); assert.equal(service.pending(second.task.id), undefined); assert.equal(h.pendingResults.size, 0);
+    h.advance(1000);
+    await assert.rejects(service.perform({ group_id: 'OPERATIONS', conversation_id: 'slow-0', request_id: 'memory-0', force: true }), (error) => error.code === 'EVALUATION_UNCERTAIN');
+    assert.equal(h.calls(), 2);
+    const next = await h.transact(() => service.claim({ record: h.records[0], checklist: h.checklist, groupId: 'OPERATIONS', force: true, requestId: 'acknowledged' }));
+    const result = await service.execute(next.task);
+    await h.transact(() => service.complete(next.task, result)); // Simulate a lost commit acknowledgement.
+    assert.equal(h.pendingResults.size, 1);
+    const replay = await service.perform({ group_id: 'OPERATIONS', conversation_id: 'slow-0', request_id: 'acknowledged', force: true });
+    assert.equal(replay.cached, true); assert.equal(h.pendingResults.size, 0); assert.equal(h.calls(), 3);
+  });
+
+  await test('a failed claim commit makes no model call; a failed result commit retries only persistence', async () => {
+    const h = await operationHarness();
+    const body = { group_id: 'OPERATIONS', conversation_id: 'slow-0', request_id: 'commit-recovery', force: true };
+    h.pool.failCommit = true;
+    await assert.rejects(h.create().perform(body), (error) => error.status === 503);
+    assert.equal(h.calls(), 0);
+    const work = h.create().perform(body); await h.started.promise;
+    h.pool.failCommit = true; h.release.resolve();
+    await assert.rejects(work, (error) => error.status === 503 && !error.message.includes('secret'));
+    assert.equal(h.calls(), 1); assert.equal(h.pendingResults.size, 1);
+    const recovered = await h.create().perform(body);
+    assert.equal(recovered.status, 'ok'); assert.equal(h.calls(), 1); assert.equal(h.pendingResults.size, 0);
+    await h.run({ readOnly: true }, () => assert.ok(store.read('evaluations', recovered.id)));
+  });
+
+  await test('process loss leaves an uncertain durable lease and never automatically repeats a paid request', async () => {
+    const h = await operationHarness();
+    await h.transact(() => h.create().claim({ record: h.records[0], checklist: h.checklist, groupId: 'OPERATIONS', requestId: 'lost-worker' }));
+    h.advance(1001);
+    const fresh = h.create({ pendingResults: new Map() });
+    await assert.rejects(fresh.perform({ group_id: 'OPERATIONS', conversation_id: 'slow-0', request_id: 'next-request' }), (error) => error.code === 'EVALUATION_UNCERTAIN');
+    assert.equal(h.calls(), 0);
+    await h.run({ readOnly: true }, () => { assert.equal(store.list('failures').length, 1); assert.match(store.list('failures')[0].validation_errors[0], /Списание/); });
+    h.release.resolve();
+    await fresh.perform({ group_id: 'OPERATIONS', conversation_id: 'slow-0', request_id: 'intentional-retry', force: true });
+    assert.equal(h.calls(), 1);
+    const cached = await fresh.perform({ group_id: 'OPERATIONS', conversation_id: 'slow-0', request_id: 'later-read' });
+    assert.equal(cached.cached, true); assert.equal(h.calls(), 1, 'a successful explicit retry clears the uncertainty barrier for cache reads');
+  });
+
+  await test('cancellation commits while a slow batch step waits; its paid result survives and queued work never starts', async () => {
+    const h = await operationHarness();
+    const create = () => require('../src/cloud-batch').createCloudBatch(h.dependencies);
+    const batch = create();
+    const job = await h.transact(() => batch.createBatch({ group_id: 'OPERATIONS' }));
+    const step = batch.stepBatch(job.id); await h.started.promise;
+    const duplicate = await create().stepBatch(job.id);
+    assert.equal(duplicate.counts.running, 1); assert.equal(h.calls(), 1);
+    const stopped = await h.transact(() => create().cancelBatch(job.id));
+    assert.equal(stopped.status, 'cancelled'); assert.equal(stopped.counts.cancelled, 1);
+    h.release.resolve(); const saved = await step;
+    assert.equal(saved.status, 'cancelled'); assert.equal(saved.done, 1); assert.equal(saved.counts.done, 1); assert.equal(saved.counts.cancelled, 1);
+    await create().stepBatch(job.id); assert.equal(h.calls(), 1);
+    await h.run({ readOnly: true }, () => assert.equal(store.list('evaluations').length, 1));
+  });
+
+  await test('batch finalization failure preserves checkpoint and retries persistence without repeating the model', async () => {
+    const h = await operationHarness();
+    const batch = require('../src/cloud-batch').createCloudBatch(h.dependencies);
+    const job = await h.transact(() => batch.createBatch({ group_id: 'OPERATIONS', conversation_ids: ['slow-0'] }));
+    const step = batch.stepBatch(job.id); await h.started.promise;
+    h.pool.failCommit = true; h.release.resolve();
+    await assert.rejects(step, (error) => error.status === 503);
+    const recovered = await batch.stepBatch(job.id);
+    assert.equal(recovered.status, 'finished'); assert.equal(recovered.done, 1); assert.equal(recovered.cost_usd, 0.003); assert.equal(h.calls(), 1);
+    await batch.stepBatch(job.id); assert.equal(h.calls(), 1);
   });
   console.log(`cloud-store: пройдено ${passed}`);
 })().catch((error) => { console.error(error); process.exitCode = 1; });

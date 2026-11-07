@@ -44,7 +44,7 @@ const allowed = [
   'src/config.js', 'src/cloud-store.js', 'public/assets/manrope.css',
   'web/index.html', 'web/tsconfig.json', 'web/src/main.tsx', 'web/src/pages/CardPage.tsx',
   'docs/DEMO_SCRIPT.md', 'docs/benchmark-results/latest.json',
-  'test/fixtures/benchmark-cases.json', 'results/dev/results.json', 'results/prod/results.json',
+  'test/fixtures/benchmark-cases.json', 'test/fixtures/benchmark-challenge-cases.json', 'docs/benchmark-results/challenge-latest.json', 'docs/benchmark-results/challenge-review.json', 'results/dev/results.json', 'results/prod/results.json',
 ];
 // CLI 65's native walker evaluates ancestor directory paths without a trailing
 // slash. Git's file-only check below accepted !api/ even when the CLI pruned api.
@@ -65,7 +65,7 @@ const privatePaths = [
   'data/datasets/DEV.json', 'data/evaluations/private.json', 'tmp/qa-report.json',
   'output/benchmark/latest.json', 'test-artifacts/screenshot.png',
   'src/.env.local', 'src/state.tmp', 'node_modules/pg/package.json',
-  'test/fixtures/unreviewed.json', 'docs/benchmark-results/baseline.json', 'results/dev/private-copy.json',
+  'test/fixtures/unreviewed.json', 'docs/benchmark-results/baseline.json', 'docs/benchmark-results/challenge-baseline.json', 'results/dev/private-copy.json',
   'public/node_modules/private.js', 'src/.vercel/auth.json', 'public/.cache/private.json',
   'web/.env.local', 'web/src/.env', 'web/node_modules/private.js', 'web/.cache/private.json',
   'dist/assets/stale-local-build.js',

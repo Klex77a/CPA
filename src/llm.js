@@ -19,6 +19,7 @@ class LlmError extends Error {
   constructor(msg, status, retryAfterMs) {
     super(msg);
     this.status = status;
+    this.code = typeof status === 'number' && status >= 400 && status < 600 ? `PROVIDER_HTTP_${status}` : ['timeout', 'network', 'invalid_json', 'empty'].includes(status) ? `PROVIDER_${status.toUpperCase()}` : 'PROVIDER_ERROR';
     this.retryAfterMs = retryAfterMs;
   }
 }
@@ -41,6 +42,7 @@ async function postJson(url, headers, body, metrics) {
     try { return JSON.parse(text); }
     catch (_) { throw new LlmError('LLM: API вернул некорректный JSON', 'invalid_json'); }
   } catch (e) {
+    metrics.unknown_call_count = (metrics.unknown_call_count || 0) + 1;
     if (e.name === 'AbortError') throw new LlmError(`LLM: тайм-аут ${Math.round(cfg.LLM_TIMEOUT_MS / 1000)} с`, 'timeout');
     if (e instanceof LlmError) throw e;
     throw new LlmError(safeFailureMessage(`LLM: сетевая ошибка (${e.message})`), 'network');
@@ -70,9 +72,11 @@ async function withRetry(fn, metrics) {
 
 const isGemini3 = () => /^gemini-3/i.test(cfg.model);
 const tokenCount = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
-function recordUsage(metrics, input, output, thoughts = 0) {
+function recordUsage(metrics, input, output, thoughts = 0, reported = true) {
   const usage = { input: tokenCount(input), output: tokenCount(output), thoughts: tokenCount(thoughts) };
   metrics.usage = usage;
+  metrics.usage_reported = reported && [input, output, thoughts].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0);
+  if (!metrics.usage_reported) metrics.unknown_call_count = (metrics.unknown_call_count || 0) + 1;
   return usage;
 }
 
@@ -125,7 +129,7 @@ async function deepseek(system, user, schema, metrics) {
   // Record provider-reported usage before checking the response shape: a blocked
   // or otherwise unusable completion may still have consumed billable tokens.
   const thoughts = tokenCount(j.usage?.completion_tokens_details?.reasoning_tokens);
-  const usage = recordUsage(metrics, j.usage?.prompt_tokens, Math.max(0, tokenCount(j.usage?.completion_tokens) - thoughts), thoughts);
+  const usage = recordUsage(metrics, j.usage?.prompt_tokens, Math.max(0, tokenCount(j.usage?.completion_tokens) - thoughts), thoughts, typeof j.usage?.completion_tokens === 'number');
   const choice = j.choices?.[0];
   if (!choice) throw new LlmError('LLM: пустой ответ', 'empty');
   metrics.structured = false;
@@ -146,7 +150,7 @@ async function openai(system, user, schema, metrics) {
   const j = await withRetry(() => postJson(`${cfg.OPENAI_BASE_URL}/chat/completions`, { Authorization: `Bearer ${cfg.keys.openai}` }, body, metrics), metrics);
   metrics.structured = false;
   const thoughts = tokenCount(j.usage?.completion_tokens_details?.reasoning_tokens);
-  const usage = recordUsage(metrics, j.usage?.prompt_tokens, Math.max(0, tokenCount(j.usage?.completion_tokens) - thoughts), thoughts);
+  const usage = recordUsage(metrics, j.usage?.prompt_tokens, Math.max(0, tokenCount(j.usage?.completion_tokens) - thoughts), thoughts, typeof j.usage?.completion_tokens === 'number');
   const choice = j.choices?.[0];
   if (!choice) throw new LlmError('LLM: пустой ответ', 'empty');
   metrics.finish_reason = choice.finish_reason || null;
@@ -173,7 +177,7 @@ async function anthropic(system, user, schema, metrics) {
 async function complete(system, user, schema) {
   const fn = { deepseek, gemini, openai, anthropic }[cfg.provider];
   if (!fn) throw new Error(`Неизвестный LLM_PROVIDER: ${cfg.provider}`);
-  const metrics = { http_attempts: 0, request_ms: 0, wait_ms: 0, structured: false, finish_reason: null };
+  const metrics = { http_attempts: 0, request_ms: 0, wait_ms: 0, structured: false, finish_reason: null, unknown_call_count: 0 };
   try {
     const r = await fn(system, user, schema, metrics);
     return { ...r, metrics };

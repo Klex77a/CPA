@@ -3,12 +3,14 @@ import { useHashRoute } from './hooks';
 import { useWorkspace } from './Workspace';
 import Icon from './components/Icon';
 import { Badge, Button, ErrorState, Spinner } from './components/ui';
+import QueueStatus from './pages/workspace/QueueStatus';
 const ConversationsPage = lazy(() => import('./pages/ConversationsPage'));
 const ConversationPage = lazy(() => import('./pages/ConversationPage'));
 const DashboardPage = lazy(() => import('./pages/DashboardPage'));
 const AppealsPage = lazy(() => import('./pages/AppealsPage'));
 const ChecklistsPage = lazy(() => import('./pages/ChecklistsPage'));
 const OperatorPage = lazy(() => import('./pages/OperatorPage'));
+const QualityReviewPage = lazy(() => import('./pages/QualityReviewPage'));
 
 class PageBoundary extends Component<
   { children: ReactNode; route: string },
@@ -48,6 +50,12 @@ const navigation = [
     label: 'Чек-лист',
     icon: 'checklist' as const,
     description: 'Критерии оценки',
+  },
+  {
+    id: 'quality',
+    label: 'Проверка качества',
+    icon: 'shield' as const,
+    description: 'Независимая разметка',
   },
 ];
 
@@ -136,6 +144,9 @@ export default function App() {
       break;
     case 'appeals':
       page = <AppealsPage />;
+      break;
+    case 'quality':
+      page = <QualityReviewPage />;
       break;
     case 'checklists':
     case 'checklist':
@@ -255,6 +266,7 @@ export default function App() {
             </div>
           </div>
         </header>
+        <QueueStatus queue={workspace.queue} />
         <main className="cqa-content" id="cqa-content" tabIndex={-1}>
           <PageBoundary route={route.join('/')}>
             <Suspense

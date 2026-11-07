@@ -16,9 +16,10 @@ let failCommit = false, requests = 0;
 cloud.withCloudStore = async ({ readOnly }, callback) => {
   requests++;
   const working = structuredClone(snapshot);
-  await store.withSnapshot(working, { readOnly }, callback);
+  const result = await store.withSnapshot(working, { readOnly }, callback);
   if (failCommit) throw new Error('private://database-connection-string');
   snapshot = working;
+  return result;
 };
 const { server, handler, readBody } = require('../server');
 const auth = 'Basic ' + Buffer.from('midnight:' + process.env.CQA_ACCESS_PASSWORD).toString('base64');
@@ -78,6 +79,7 @@ async function test(name, callback) { await callback(); passed++; console.log('â
       const body = await response.text();
       assert.ok(!body.includes('private://'));
       assert.ok(!body.includes('"total_records"'));
+      assert.equal(JSON.parse(body).code, undefined, 'database/driver codes stay private');
       assert.equal(snapshot.datasets['not-committed'], undefined);
       failCommit = false;
       const buffer = new HttpBuffer(), events = [];
@@ -116,6 +118,32 @@ async function test(name, callback) { await callback(); passed++; console.log('â
       const repeated = await call('POST', '/api/batch/' + id + '/step', {});
       assert.equal(repeated.result.done, 1);
       assert.equal(Object.keys(snapshot.evaluations).length, 1, 'committed work is not evaluated again');
+    });
+    await test('dataset summaries expose only a safe current failed retry and clear it after newer success', async () => {
+      const record = snapshot.datasets.CLOUD.records[0];
+      const checklist = snapshot.checklists.default;
+      const future = Date.now() + 1000;
+      const saved = await cloud.withCloudStore({}, () => require('../src/evaluation-failure').saveEvaluationFailure(record, checklist, 'CLOUD', new Error('Provider timeout Bearer private-key-value https://example.com?sig=private-signature'), { created_at: new Date(future).toISOString() }));
+      const base = `http://127.0.0.1:${server.address().port}`;
+      const first = await (await fetch(base + '/api/datasets/CLOUD', { headers })).json();
+      assert.equal(first.records[0].failures.length, 1);
+      const failure = first.records[0].failures[0];
+      assert.equal(failure.id, saved.id); assert.equal(failure.status, 'error'); assert.equal(failure.checklist.id, 'default');
+      assert.ok(!JSON.stringify(failure).includes('private-key-value')); assert.ok(!JSON.stringify(failure).includes('private-signature'));
+      assert.ok(first.records[0].evaluations.length > 0, 'the earlier good/reviewable analysis remains available');
+      await cloud.withCloudStore({}, () => {
+        const latest = store.list('evaluations')[0]; latest.id = 'newer-success'; latest.created_at = new Date(future + 1000).toISOString(); store.write('evaluations', latest.id, latest);
+      });
+      const second = await (await fetch(base + '/api/datasets/CLOUD', { headers })).json();
+      assert.deepEqual(second.records[0].failures, []);
+      const taskCount = Object.keys(snapshot.jobs).length;
+      const rejected = await fetch(base + '/api/%65valuate', { method: 'POST', headers: { ...headers, origin: 'https://untrusted.example', 'Content-Type': 'application/json' }, body: JSON.stringify({ group_id: 'CLOUD', conversation_id: 'test', force: true, request_id: 'untrusted' }) });
+      assert.equal(rejected.status, 403); assert.equal(Object.keys(snapshot.jobs).length, taskCount, 'paid routes retain same-origin checks before claiming work');
+      const evaluateBody = { group_id: 'CLOUD', conversation_id: 'test', request_id: 'bind-public-error', force: false };
+      const reused = { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify(evaluateBody) };
+      assert.equal((await fetch(base + '/api/evaluate', reused)).status, 200);
+      const changed = await fetch(base + '/api/evaluate', { ...reused, body: JSON.stringify({ ...evaluateBody, force: true }) });
+      assert.equal(changed.status, 409); assert.equal((await changed.json()).code, 'EVALUATION_INPUT_CHANGED');
     });
     console.log(`hosting: ${passed} checks passed`);
   } finally { if (server.listening) server.close(); }

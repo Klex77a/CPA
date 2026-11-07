@@ -4,6 +4,44 @@ export const formatNumber = (value: number | null | undefined, digits = 2) =>
     ? '—'
     : value.toLocaleString('ru-RU', { maximumFractionDigits: digits });
 export const fmt = formatNumber;
+interface CostObservation {
+  cost_usd: number | null;
+  known_cost_usd?: number;
+  billing_complete?: boolean;
+  unknown_cost_count?: number;
+  unknown_call_count?: number;
+}
+export const costIsComplete = (value: CostObservation) =>
+  value.cost_usd != null &&
+  Number.isFinite(value.cost_usd) &&
+  value.billing_complete !== false &&
+  !value.unknown_cost_count &&
+  !value.unknown_call_count;
+export const knownCost = (value: CostObservation) =>
+  value.known_cost_usd != null && Number.isFinite(value.known_cost_usd)
+    ? value.known_cost_usd
+    : value.cost_usd != null && Number.isFinite(value.cost_usd)
+      ? value.cost_usd
+      : null;
+export function costDescription(value: CostObservation) {
+  if (costIsComplete(value)) return `≈ $${value.cost_usd!.toFixed(4)}`;
+  const observed = knownCost(value);
+  return observed != null && observed > 0
+    ? `не менее $${observed.toFixed(4)}; полная стоимость неизвестна`
+    : 'полная стоимость неизвестна';
+}
+export function usageDescription(
+  value: Pick<Evaluation, 'usage' | 'known_usage' | 'billing_complete' | 'unknown_call_count'>,
+) {
+  const complete = value.usage && value.billing_complete !== false && !value.unknown_call_count;
+  const usage = complete ? value.usage : (value.known_usage ?? value.usage);
+  if (!usage) return 'Токены неизвестны: данные о расходе не получены.';
+  const tokens = `${usage.input} вход / ${usage.output} выход${usage.thoughts ? ` + ${usage.thoughts} размышление` : ''}`;
+  if (complete) return `Токены: ${tokens}.`;
+  return usage.input + usage.output + usage.thoughts > 0
+    ? `Токены (учтённый минимум): ${tokens}; полное число неизвестно.`
+    : 'Токены неизвестны: данные о полном расходе не получены.';
+}
 export const formatDate = (value?: string) =>
   value && Number.isFinite(Date.parse(value))
     ? new Date(value).toLocaleString('ru-RU', {

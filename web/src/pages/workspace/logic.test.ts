@@ -45,6 +45,37 @@ const job = (patch: Partial<QueueJob> = {}): QueueJob => ({
 });
 
 describe('conversation list', () => {
+  it('keeps a newer matching failure alongside a prior score, but excludes another checklist version and a later successful retry', () => {
+    const failure = {
+      id: 'fail',
+      group_id: 'DEV',
+      conversation_id: 'x',
+      status: 'error' as const,
+      created_at: '2026-11-08T00:01:00Z',
+      checklist: { id: 'default', version: 1 },
+      reason: 'Temporary error',
+    };
+    const prior = evaluation({ created_at: '2026-11-08T00:00:00Z' });
+    const rows = listRows([{ ...record('x', [prior]), failures: [failure] }], 'default', 1);
+    expect(rows[0].evaluation).toBe(prior);
+    expect(rows[0].failure).toEqual(failure);
+    expect(matchesQuick(rows[0], 'failed')).toBe(true);
+    expect(
+      listRows([{ ...record('x'), failures: [failure] }], 'default', 2)[0].failure,
+    ).toBeUndefined();
+    expect(
+      listRows(
+        [
+          {
+            ...record('x', [evaluation({ created_at: '2026-11-08T00:02:00Z' })]),
+            failures: [failure],
+          },
+        ],
+        'default',
+        1,
+      )[0].failure,
+    ).toBeUndefined();
+  });
   it('uses only the current checklist and excludes stale evaluations from active scores', () => {
     const rows = listRows(
       [

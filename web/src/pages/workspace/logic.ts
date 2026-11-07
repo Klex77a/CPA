@@ -3,6 +3,7 @@ import type { Filters, ListRecord, QueueJob, Row } from './models';
 export const quickFilters = [
   ['all', 'Все'],
   ['todo', 'Не оценены'],
+  ['failed', 'Ошибки'],
   ['review', 'Нужна проверка'],
   ['gross', 'Грубые ошибки'],
   ['low', 'Ниже 60'],
@@ -15,7 +16,9 @@ export function matchesQuick(row: Row, key: string): boolean {
   const e = row.evaluation;
   switch (key) {
     case 'todo':
-      return !e;
+      return !e && !row.failure;
+    case 'failed':
+      return !!row.failure;
     case 'review':
       return !!e && (e.status === 'needs_review' || e.gross_error_unknown);
     case 'gross':
@@ -32,10 +35,27 @@ export function matchesQuick(row: Row, key: string): boolean {
       return true;
   }
 }
-export function listRows(records: ListRecord[], checklistId: string): Row[] {
+export function listRows(
+  records: ListRecord[],
+  checklistId: string,
+  checklistVersion?: number,
+): Row[] {
   return records.map((record) => {
     const history = record.evaluations.filter((e) => e.checklist.id === checklistId);
-    return { record, history, evaluation: history.find((e) => !e.stale) };
+    const evaluation = history.find((e) => !e.stale);
+    const latestFailure = record.failures
+      ?.filter(
+        (failure) =>
+          failure.checklist.id === checklistId &&
+          (checklistVersion == null || failure.checklist.version === checklistVersion),
+      )
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+    const failure =
+      latestFailure &&
+      (!evaluation?.created_at || latestFailure.created_at >= evaluation.created_at)
+        ? latestFailure
+        : undefined;
+    return { record, history, evaluation, failure };
   });
 }
 export function filterRows(rows: Row[], filters: Filters): Row[] {
@@ -78,9 +98,12 @@ export async function advanceQueue(
   get: (path: string) => Promise<QueueJob>,
   post: (path: string, body: object) => Promise<QueueJob>,
   active: () => boolean = () => true,
+  onRead?: (job: QueueJob) => void,
 ): Promise<QueueJob> {
   const job = await get('/batch/' + encodeURIComponent(id));
-  if (!active() || job.execution_mode !== 'stepped' || job.status !== 'running') return job;
+  if (!active()) return job;
+  onRead?.(job);
+  if (job.execution_mode !== 'stepped' || job.status !== 'running') return job;
   return post('/batch/' + encodeURIComponent(id) + '/step', {});
 }
 export const number = (value: number | null | undefined, digits = 1) =>

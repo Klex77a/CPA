@@ -2,6 +2,7 @@ export class ApiError extends Error {
   constructor(
     message: string,
     public status: number,
+    public code?: string,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -27,6 +28,7 @@ async function request<T>(
     throw new ApiError(
       result.error || `Не удалось выполнить запрос (${response.status})`,
       response.status,
+      typeof result.code === 'string' ? result.code : undefined,
     );
   return result as T;
 }

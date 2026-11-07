@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { Answer, Conversation, Criterion, Evaluation, EvaluationSummary } from '../../types';
 import { api } from '../../api';
+import { costDescription, usageDescription } from '../../format';
 import {
   answerText,
   cardPath,
@@ -782,14 +783,10 @@ export default function EvaluationPane({
               <p>
                 {evaluation.provider} / {evaluation.model} ·{' '}
                 {number((evaluation.timing?.total_ms ?? evaluation.duration_ms) / 1000, 1)} с ·{' '}
-                {evaluation.cost_usd == null ? 'стоимость неизвестна' : `≈ $${evaluation.cost_usd}`}
+                {costDescription(evaluation)}
               </p>
               <p>
-                Токены: {evaluation.usage?.input ?? '—'} вход / {evaluation.usage?.output ?? '—'}{' '}
-                выход
-                {evaluation.usage?.thoughts
-                  ? ` + ${evaluation.usage.thoughts} размышление`
-                  : ''}.{' '}
+                {usageDescription(evaluation)}{' '}
                 {evaluation.timing &&
                   `Модель: ${number(evaluation.timing.llm_ms / 1000, 1)} с; HTTP-попыток: ${evaluation.timing.http_attempts}; очередь: ${number(evaluation.timing.queue_ms / 1000, 1)} с; ожидание повторов: ${number(evaluation.timing.retry_wait_ms / 1000, 1)} с.`}
               </p>

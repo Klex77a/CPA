@@ -11,6 +11,7 @@ import { api } from './api';
 import type { Appeal, Checklist, Config, DatasetSummary } from './types';
 import { Button, Spinner } from './components/ui';
 import Icon from './components/Icon';
+import { useQueue, type QueueController } from './pages/workspace/useQueue';
 
 type NoticeKind = 'success' | 'error' | 'info';
 export interface ConversationOrder {
@@ -30,6 +31,8 @@ interface WorkspaceValue {
   notify: (message: string, kind?: NoticeKind) => void;
   conversationOrder: ConversationOrder | null;
   setConversationOrder: (value: ConversationOrder | null) => void;
+  queue: QueueController;
+  evaluationRevision: number;
 }
 const Context = createContext<WorkspaceValue | null>(null);
 const saved = (name: string, fallback: string) => {
@@ -62,11 +65,14 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     [conversationOrder, setConversationOrder] = useState<ConversationOrder | null>(null);
   const [notice, setNotice] = useState<{ message: string; kind: NoticeKind } | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [evaluationRevision, setEvaluationRevision] = useState(0);
   const notify = useCallback((message: string, kind: NoticeKind = 'success') => {
     setNotice({ message, kind });
     if (noticeTimer.current) clearTimeout(noticeTimer.current);
     noticeTimer.current = setTimeout(() => setNotice(null), kind === 'error' ? 8000 : 4500);
   }, []);
+  const queueUpdated = useCallback(() => setEvaluationRevision((value) => value + 1), []);
+  const queue = useQueue(queueUpdated, notify);
   const setGroup = useCallback((value: string) => {
     updateGroup(value);
     save('group', value);
@@ -153,6 +159,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         notify,
         conversationOrder,
         setConversationOrder,
+        queue,
+        evaluationRevision,
       }}
     >
       {children}

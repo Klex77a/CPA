@@ -1,0 +1,286 @@
+{
+  "kind": "engineering_reference_review",
+  "schema_version": "1.0",
+  "fixture_digest": "c09e654240731edb33c531440dcfe0a24d0584506d73e9aa3cef929be1cdad0e",
+  "state": "disputed",
+  "independent_expert_validation": false,
+  "reviewer_type": "engineering_peer_review",
+  "review_method": "Post-hoc internal review after the model outputs were seen. The implementation team also authored the synthetic labels; this is not blinded or independent adjudication.",
+  "summary": "Первый прогон: 283/312 совпадений, 38 обработанных диалогов, один технический сбой. В 17 диалогах найдена 21 спорная метка: часть эталонов завышает эмпатию и ведение, часть допускает разное толкование границ критериев. Это последующий инженерный разбор. Независимая экспертная проверка ещё требуется. Исходные ответы и разметка сохранены; 90,71% отражает согласие с этой разметкой.",
+  "observed_run_started_at": "2026-11-07T22:25:50.437Z",
+  "raw_agreement": {
+    "matched": 283,
+    "total": 312,
+    "completed_cases": 38,
+    "failed_cases": 1,
+    "value_disagreements": 21
+  },
+  "findings": [
+    {
+      "case_id": "ru-challenge-consultation-5",
+      "criterion_id": "c05",
+      "category": "reference_questionable",
+      "rule": "Empathy requires a response to a concrete complaint or inconvenience; polite wording alone is insufficient once the customer explicitly reports a problem.",
+      "source_turns": [
+        3,
+        4
+      ],
+      "reason": "The customer says the hint still leaves them unable to act; the operator immediately closes without acknowledging this problem. The reference YES used a generic default unsupported by these turns. Model NO is defensible; do not count this as a proven model error."
+    },
+    {
+      "case_id": "kz-challenge-consultation-5",
+      "criterion_id": "c05",
+      "category": "reference_questionable",
+      "rule": "Empathy requires a response to a concrete complaint or inconvenience.",
+      "source_turns": [
+        3,
+        4
+      ],
+      "reason": "The customer explicitly says they still do not know what to open or press. The closing message contains no response to that difficulty; reference YES is poorly grounded."
+    },
+    {
+      "case_id": "en-challenge-consultation-5",
+      "criterion_id": "c05",
+      "category": "reference_questionable",
+      "rule": "Empathy requires a response to a concrete complaint or inconvenience.",
+      "source_turns": [
+        3,
+        4
+      ],
+      "reason": "The customer's stated inability to act is ignored before goodbye. Courteous closing alone does not support the reference YES."
+    },
+    {
+      "case_id": "ru-challenge-consultation-10",
+      "criterion_id": "c05",
+      "category": "reference_questionable",
+      "rule": "An unanswered question alone is a consultation issue, but an explicit subsequent customer complaint also requires a concrete response for empathy.",
+      "source_turns": [
+        3,
+        4
+      ],
+      "reason": "After the customer explicitly points out the missing answer, the operator provides only a generic closing. The reference never identifies an acknowledgment of that complaint."
+    },
+    {
+      "case_id": "kz-challenge-consultation-10",
+      "criterion_id": "c05",
+      "category": "reference_questionable",
+      "rule": "A specific expressed problem requires acknowledgment, without imposing a mandatory apology phrase.",
+      "source_turns": [
+        3,
+        4
+      ],
+      "reason": "The operator ignores the customer's specific complaint about the unanswered market-order question. Reference YES is questionable; the model should justify absence of acknowledgment rather than demand an apology formula."
+    },
+    {
+      "case_id": "en-challenge-consultation-10",
+      "criterion_id": "c05",
+      "category": "reference_questionable",
+      "rule": "Empathy includes response to an explicitly expressed inconvenience.",
+      "source_turns": [
+        3,
+        4
+      ],
+      "reason": "The customer points out the unresolved part and the operator immediately closes. The blanket reference YES is not supported by a concrete response."
+    },
+    {
+      "case_id": "ru-challenge-long-voice-asr-adversarial",
+      "criterion_id": "c06",
+      "category": "reference_questionable",
+      "rule": "Dialogue quality includes coherence and order, not just grammatical clarity of individual sentences.",
+      "source_turns": [
+        4,
+        5,
+        7,
+        8,
+        79,
+        80,
+        81
+      ],
+      "reason": "The operator repeats the same definition 25 times despite repeated confirmations that the customer can hear. System-role ASR noise does not excuse the operator-role loop. A perfect 10 is unsupported; the exact lower step needs adjudication and is not automatically the model's 4."
+    },
+    {
+      "case_id": "kz-challenge-long-voice-asr-adversarial",
+      "criterion_id": "c06",
+      "category": "reference_questionable",
+      "rule": "Coherent progression and reaction to context are part of dialogue quality.",
+      "source_turns": [
+        4,
+        5,
+        7,
+        8,
+        79,
+        80,
+        81
+      ],
+      "reason": "The synthetic text contains a repeated operator loop, not merely system-role noise. The reference 10 ignores this independently visible flow problem; do not force the model to award full points."
+    },
+    {
+      "case_id": "en-challenge-long-voice-asr-adversarial",
+      "criterion_id": "c06",
+      "category": "reference_questionable",
+      "rule": "A clear sentence repeated without progression does not establish a fully coherent dialogue.",
+      "source_turns": [
+        4,
+        5,
+        7,
+        8,
+        79,
+        80,
+        81
+      ],
+      "reason": "The operator keeps repeating after the customer says they can hear clearly. The fixture's perfect dialogue label is not defensible merely because individual sentences are grammatical."
+    },
+    {
+      "case_id": "ru-challenge-consultation-5",
+      "criterion_id": "c06",
+      "category": "boundary_disagreement",
+      "rule": "Consultation step 5 covers a general hint that leaves action unclear; dialogue step 4 covers clarification caused by phrasing or order. These may overlap and require separate grounds.",
+      "source_turns": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "reason": "The vague instruction can be read as incomplete guidance or as a communication defect. Reference 10 and model 4 cannot be resolved by value matching alone; specify which observable fault belongs to each criterion."
+    },
+    {
+      "case_id": "kz-challenge-consultation-5",
+      "criterion_id": "c06",
+      "category": "boundary_disagreement",
+      "rule": "Separate completeness of next steps from clarity of language; require an independent observable dialogue defect before adding a second penalty.",
+      "source_turns": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "reason": "The customer's inability to act supports consultation 5, but does not by itself settle whether the vague wording also warrants dialogue 4."
+    },
+    {
+      "case_id": "en-challenge-consultation-5",
+      "criterion_id": "c06",
+      "category": "boundary_disagreement",
+      "rule": "The boundary between a general hint and unclear phrasing needs human adjudication.",
+      "source_turns": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "reason": "Look somewhere in the settings is semantically understandable but operationally vague. Whether this independently violates dialogue clarity is not determined by the current engineering rationale."
+    },
+    {
+      "case_id": "ru-challenge-consultation-15",
+      "criterion_id": "c04",
+      "category": "boundary_disagreement",
+      "rule": "Step 15 means the main question is resolved with a minor detail missing; step 10 means a substantial question remains open.",
+      "source_turns": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "reason": "The fixture treats the requested abbreviation as secondary; the model treats the explicitly requested and later mentioned abbreviation as a substantial unresolved part. Relative importance is not objectively established by the engineering label."
+    },
+    {
+      "case_id": "kz-challenge-consultation-15",
+      "criterion_id": "c04",
+      "category": "boundary_disagreement",
+      "rule": "The distinction between omitted detail and unresolved substantial request requires an agreed importance rubric.",
+      "source_turns": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "reason": "The main definition is explained, but the customer explicitly requested an abbreviation. Neither the model's 10 nor reference 15 should be declared independently correct without adjudicating that part's importance."
+    },
+    {
+      "case_id": "en-challenge-consultation-15",
+      "criterion_id": "c04",
+      "category": "boundary_disagreement",
+      "rule": "Consultation 15 versus 10 depends on whether the missing part is secondary or substantial.",
+      "source_turns": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "reason": "The fixture assumes the abbreviation is secondary even though it is explicitly requested and noted as missing. A template-specific prompt rule declaring abbreviations minor would game this case rather than establish general quality."
+    },
+    {
+      "case_id": "ru-challenge-consultation-na",
+      "criterion_id": "c02",
+      "category": "boundary_disagreement",
+      "rule": "Discovery YES covers clarifying an incomplete request before answering; the stated N/A condition is enough information from the outset.",
+      "source_turns": [
+        1,
+        2,
+        3
+      ],
+      "reason": "No substantive request exists before the technical cut. How may I help can be reasonably treated as eliciting the missing need, while the reference marks discovery N/A. The checklist does not explicitly settle this no-request edge case."
+    },
+    {
+      "case_id": "kz-challenge-critical-private-paid",
+      "criterion_id": "c05",
+      "category": "boundary_disagreement",
+      "rule": "With no expressed complaint, the current empathy definition accepts courteous tone; private paid solicitation is separately a critical flag. Client orientation may create a competing interpretation.",
+      "source_turns": [
+        2,
+        3,
+        4
+      ],
+      "reason": "The model lowers empathy for promoting personal paid services instead of helping. The reference isolates this as critical/consultation and retains courtesy credit. This is a disputed cross-criterion boundary, not an established model error."
+    },
+    {
+      "case_id": "kz-challenge-discovery-repeated-context",
+      "criterion_id": "c06",
+      "category": "boundary_disagreement",
+      "rule": "Repeating already supplied context is explicitly a discovery failure, while dialogue also considers order and coherence.",
+      "source_turns": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "reason": "The model sees one flow defect because the customer must repeat known details. The reference treats that defect solely under discovery. A separate observable-flow rule is needed before claiming either 7 or 10 as gold."
+    },
+    {
+      "case_id": "en-challenge-discovery-repeated-context",
+      "criterion_id": "c06",
+      "category": "boundary_disagreement",
+      "rule": "Discovery and dialogue can share evidence, but their grounds must be distinguished.",
+      "source_turns": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "reason": "The redundant question may affect flow as well as discovery; the current reference rationale only asserts clarity and does not resolve that boundary."
+    },
+    {
+      "case_id": "ru-challenge-critical-private-paid",
+      "criterion_id": "c06",
+      "category": "model_risk",
+      "rule": "An unethical offer or refusal does not automatically reduce clarity. A contradiction must concern incompatible claims, not merely different question scopes.",
+      "source_turns": [
+        2,
+        4
+      ],
+      "reason": "The model treats refusing this answer here and offering help on other questions as a contradiction. Those scopes may be compatible. This suggests possible over-penalization, but a peer review after seeing outputs cannot establish the reference 10 as independent truth."
+    },
+    {
+      "case_id": "en-challenge-consultation-10",
+      "criterion_id": "c06",
+      "category": "model_risk",
+      "rule": "An unanswered question alone lowers consultation; dialogue requires a separate clarity, coherence, order or waiting defect.",
+      "source_turns": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "reason": "The model lowers dialogue because the closing does not address an already unanswered question. This may repeat the consultation/empathy penalty without an independent communication defect; human adjudication must distinguish this from genuinely broken progression."
+    }
+  ]
+}

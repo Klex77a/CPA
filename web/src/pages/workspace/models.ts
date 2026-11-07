@@ -1,3 +1,5 @@
+import type { EvaluationFailureSummary, Readiness as WorkspaceReadiness } from '../../types';
+
 export interface ListEvaluation {
   id: string;
   checklist: { id: string; name: string; version: number };
@@ -13,6 +15,7 @@ export interface ListEvaluation {
   appeals_total: number;
   stale?: boolean;
   record_changed?: boolean;
+  created_at?: string;
 }
 export interface ListRecord {
   conversation_id: string;
@@ -21,6 +24,7 @@ export interface ListRecord {
   messages: number;
   has_audio: boolean;
   evaluations: ListEvaluation[];
+  failures?: EvaluationFailureSummary[];
 }
 export interface DatasetList {
   group_id: string;
@@ -31,6 +35,7 @@ export interface Row {
   record: ListRecord;
   evaluation?: ListEvaluation;
   history: ListEvaluation[];
+  failure?: EvaluationFailureSummary;
 }
 export interface Filters {
   query: string;
@@ -42,13 +47,18 @@ export interface Filters {
 }
 export interface QueueJob {
   id: string;
+  group_id?: string;
+  checklist_id?: string;
   status: string;
   execution_mode?: string;
   done: number;
   total: number;
   skipped?: number;
-  cost_usd: number;
+  cost_usd: number | null;
+  known_cost_usd?: number;
+  billing_complete?: boolean;
   unknown_cost_count?: number;
+  unknown_call_count?: number;
   counts?: Record<string, number>;
   errors: { conversation_id?: string; error: string }[];
 }
@@ -120,7 +130,11 @@ export interface Analytics {
   appeals_open: number;
   appeals_total: number;
   changed_by_appeal: number;
-  cost_usd: number;
+  cost_usd: number | null;
+  known_cost_usd?: number;
+  billing_complete?: boolean;
+  unknown_cost_count?: number;
+  unknown_call_count?: number;
   low_confidence: number;
   languages: string[];
   by_language: Record<string, { avg: number | null; n: number }>;
@@ -175,31 +189,4 @@ export interface AppealEvaluation {
 export interface TranscriptRecord {
   transcript: { speaker: string; timestamp?: string; text: string }[];
 }
-export interface Readiness {
-  benchmark: {
-    state: string;
-    message: string;
-    model?: string;
-    case_count?: number;
-    metrics?: {
-      criterion_match: { rate: number; matched: number; total: number };
-      by_language: Record<string, { matched: number; total: number }>;
-      cases: { failed: number; invalid: number };
-      critical: { tp: number; expected_positive: number; fp: number; unknown: number };
-      timing: { p50_ms: number | null };
-      cost: { total_usd: number; complete: boolean };
-    };
-  };
-  submissions: {
-    split: string;
-    path: string;
-    expected: number;
-    total: number;
-    ok: number;
-    errors: number;
-    state: string;
-    message: string;
-  }[];
-  publication: { state: string; message: string };
-  demo: { total_seconds: number; steps: { seconds: number; title: string; detail: string }[] };
-}
+export type Readiness = WorkspaceReadiness;

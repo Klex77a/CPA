@@ -32,6 +32,7 @@ jobs:
       # npm test compiles the React application through its pretest hook.
       - run: npm test
       - run: npm run benchmark
+      - run: npm run benchmark:challenge
       - name: Validate saved DEV submission
         run: node scripts/validate-results.js results/dev/results.json --split=dev
       - name: Validate saved control submission when available

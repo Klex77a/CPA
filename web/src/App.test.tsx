@@ -37,7 +37,7 @@ describe('workspace navigation', () => {
     expect(close).toHaveFocus();
     expect(document.querySelector<HTMLElement>('.cqa-workspace')?.inert).toBe(true);
     await user.tab({ shift: true });
-    expect(screen.getByRole('link', { name: 'Чек-лист' })).toHaveFocus();
+    expect(screen.getByRole('link', { name: 'Проверка качества' })).toHaveFocus();
     await user.tab();
     expect(close).toHaveFocus();
     fireEvent.keyDown(document, { key: 'Escape' });

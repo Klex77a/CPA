@@ -89,9 +89,46 @@ async function test(name, run) {
       assert.equal(saved.status, 'ok');
       assert.equal(saved.samples, 2);
       assert.equal(saved.successful_samples, 1);
-      assert.deepEqual(saved.usage, { input: 300, output: 80, thoughts: 20 });
-      assert.equal(saved.cost_usd, 0.0005);
+      assert.equal(saved.usage, null);
+      assert.equal(saved.cost_usd, null);
+      assert.deepEqual(saved.known_usage, { input: 300, output: 80, thoughts: 20 });
+      assert.equal(saved.known_cost_usd, 0.0005);
+      assert.equal(saved.billing_complete, false);
+      assert.equal(saved.unknown_call_count, 1);
       assert.equal(saved.timing.calls.length, 3);
+    });
+
+    await test('an actual HTTP error before any usage is unknown billing, never a fabricated free attempt', async () => {
+      llm.complete = realComplete;
+      global.fetch = async () => ({ ok: false, status: 503, headers: { get: () => null }, text: async () => 'Service unavailable' });
+      const error = await evaluate(record, checklist, 'NO_USAGE_HTTP').then(() => { throw new Error('Expected failure'); }, error => error);
+      assert.equal(error.code, 'PROVIDER_HTTP_503'); assert.equal(error.status, 503);
+      const work = error.evaluation_metrics;
+      assert.equal(work.cost_usd, null); assert.equal(work.usage, null); assert.equal(work.billing_complete, false); assert.equal(work.unknown_call_count, 1);
+      assert.equal(work.known_cost_usd, 0); assert.deepEqual(work.known_usage, { input: 0, output: 0, thoughts: 0 });
+      assert.equal(work.timing.calls[0].usage, null); assert.equal(work.timing.http_attempts, 1);
+    });
+
+    await test('a billed initial response survives an unknown repair failure as an explicit lower bound', async () => {
+      let calls = 0;
+      llm.complete = async () => {
+        if (++calls === 1) return { ...response(), text: 'invalid model JSON' };
+        throw Object.assign(new Error('Transport disconnected'), { status: 'network', metrics: { http_attempts: 1, request_ms: 5, wait_ms: 0 } });
+      };
+      const error = await evaluate(record, checklist, 'PARTIAL_BILLING').then(() => { throw new Error('Expected failure'); }, error => error);
+      const work = error.evaluation_metrics;
+      assert.equal(work.cost_usd, null); assert.equal(work.usage, null); assert.equal(work.known_cost_usd, 0.0002);
+      assert.deepEqual(work.known_usage, { input: 100, output: 30, thoughts: 20 }); assert.equal(work.unknown_call_count, 1); assert.equal(work.billing_complete, false);
+      const saved = saveEvaluationFailure(record, checklist, 'PARTIAL_BILLING', error);
+      assert.equal(saved.cost_usd, null); assert.equal(saved.usage, null); assert.equal(saved.known_cost_usd, 0.0002); assert.equal(saved.billing_complete, false);
+    });
+
+    await test('a successful completion without provider usage does not fabricate zero-cost billing', async () => {
+      llm.complete = realComplete;
+      global.fetch = async () => ({ ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify({ choices: [{ message: { content: JSON.stringify(parsed()) }, finish_reason: 'stop' }] }) });
+      const result = await evaluate(record, checklist, 'SUCCESS_WITHOUT_USAGE');
+      assert.equal(result.status, 'ok'); assert.equal(result.usage, null); assert.equal(result.cost_usd, null);
+      assert.equal(result.known_cost_usd, 0); assert.equal(result.unknown_call_count, 1); assert.equal(result.billing_complete, false);
     });
 
     await test('every concurrent failed sample settles before failure metrics are returned', async () => {

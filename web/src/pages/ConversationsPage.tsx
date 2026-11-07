@@ -2,6 +2,11 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, apiUrl } from '../api';
 import { useResource } from '../hooks';
 import { useWorkspace } from '../Workspace';
+import {
+  evaluateWithRequest,
+  evaluationActionLabel,
+  useEvaluationRequests,
+} from '../evaluationRequests';
 import { Button, ErrorState, Modal, PageHeader, Spinner } from '../components/ui';
 import {
   cardHref,
@@ -23,7 +28,6 @@ import {
   Stat,
   StatusTag,
 } from './workspace/WorkspaceUi';
-import { useQueue } from './workspace/useQueue';
 
 const initialFilters: Filters = {
   query: '',
@@ -43,7 +47,11 @@ export default function ConversationsPage() {
     refreshBase,
     notify,
     setConversationOrder,
+    checklists,
+    queue,
+    evaluationRevision,
   } = useWorkspace();
+  const evaluationRequests = useEvaluationRequests();
   const resource = useResource<DatasetList | null>(`list:${group}`, (signal) =>
     group ? api.get(`/datasets/${encodeURIComponent(group)}`, signal) : Promise.resolve(null),
   );
@@ -64,10 +72,15 @@ export default function ConversationsPage() {
     [clearing, setClearing] = useState(false);
   const uploadRef = useRef<HTMLInputElement>(null);
   const importLock = useRef(false);
-  const queue = useQueue(resource.reload, notify);
+  const lastRevision = useRef(evaluationRevision);
+  useEffect(() => {
+    if (lastRevision.current !== evaluationRevision) resource.reload();
+    lastRevision.current = evaluationRevision;
+  }, [evaluationRevision, resource.reload]);
+  const checklistVersion = checklists.find((checklist) => checklist.id === checklistId)?.version;
   const rows = useMemo(
-    () => listRows(resource.data?.records || [], checklistId),
-    [resource.data, checklistId],
+    () => listRows(resource.data?.records || [], checklistId, checklistVersion),
+    [resource.data, checklistId, checklistVersion],
   );
   const filtered = useMemo(() => filterRows(rows, filters), [rows, filters]);
   const shown = useMemo(() => sortRows(filtered, filters), [filtered, filters]);
@@ -127,15 +140,16 @@ export default function ConversationsPage() {
     if (busyRows.has(cid)) return;
     setBusyRows((previous) => new Set(previous).add(cid));
     try {
-      await api.post('/evaluate', {
+      await evaluateWithRequest({
         group_id: group,
         conversation_id: cid,
         checklist_id: checklistId,
-        force: !!row.evaluation,
+        force: !!row.evaluation || !!row.failure,
       });
       resource.reload();
       notify(`Диалог ${cid} оценён`, 'success');
     } catch (cause) {
+      resource.reload();
       notify(errorMessage(cause), 'error');
     } finally {
       setBusyRows((previous) => {
@@ -288,78 +302,18 @@ export default function ConversationsPage() {
             value={
               rows.filter(
                 (r) =>
-                  r.evaluation &&
-                  (r.evaluation.gross_error ||
-                    r.evaluation.gross_error_unknown ||
-                    r.evaluation.status === 'needs_review' ||
-                    r.evaluation.appeals_open),
+                  r.failure ||
+                  (r.evaluation &&
+                    (r.evaluation.gross_error ||
+                      r.evaluation.gross_error_unknown ||
+                      r.evaluation.status === 'needs_review' ||
+                      r.evaluation.appeals_open)),
               ).length
             }
             detail={`${rows.filter((r) => r.evaluation?.appeals_open).length} с открытыми апелляциями`}
             tone="warning"
           />
         </div>
-        {(queue.job || queue.error || queue.running) && (
-          <section className="cqa-queue-panel" aria-label="Очередь оценки" aria-live="polite">
-            <div className="cqa-inline-between">
-              <strong>
-                {queue.running
-                  ? 'Оценка набора'
-                  : queue.job?.status === 'cancelled'
-                    ? 'Очередь остановлена'
-                    : 'Оценка завершена'}
-              </strong>
-              <span>
-                {queue.job ? `${queue.job.done} / ${queue.job.total}` : 'Восстанавливаем очередь…'}
-              </span>
-              {queue.running && (
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  loading={queue.cancelling}
-                  onClick={() => void queue.cancel()}
-                >
-                  Остановить
-                </Button>
-              )}
-            </div>
-            {queue.job && (
-              <>
-                <progress value={queue.job.done} max={queue.job.total || 1} />
-                <div className="cqa-cell-muted">
-                  Пропущено готовых: {queue.job.skipped || 0} · ≈ $
-                  {queue.job.cost_usd?.toFixed(4) || '0.0000'}
-                  {queue.job.unknown_cost_count ? ' · часть расходов неизвестна' : ''}
-                </div>
-                {queue.job.execution_mode === 'stepped' && queue.running && (
-                  <p className="cqa-cell-muted">
-                    Держите список открытым. После обновления страницы обработка продолжится.
-                  </p>
-                )}
-                {queue.job.errors.length > 0 && (
-                  <details>
-                    <summary>Ошибки обработки · {queue.job.errors.length}</summary>
-                    {queue.job.errors.map((error, index) => (
-                      <p key={index}>
-                        {error.conversation_id}: {error.error}
-                      </p>
-                    ))}
-                  </details>
-                )}
-              </>
-            )}
-            {queue.error && (
-              <div role="status" className="cqa-inline-between">
-                <span>{queue.error}</span>
-                {queue.running && (
-                  <Button size="sm" variant="secondary" onClick={queue.retry}>
-                    Повторить
-                  </Button>
-                )}
-              </div>
-            )}
-          </section>
-        )}
         <section className="cqa-data-panel">
           <div className="cqa-list-filters">
             <div className="cqa-filter-inputs">
@@ -472,7 +426,12 @@ export default function ConversationsPage() {
                 </thead>
                 <tbody>
                   {shown.map((row) => {
-                    const { record: r, evaluation: e, history } = row;
+                    const { record: r, evaluation: e, history, failure } = row;
+                    const pendingRequest = evaluationRequests.get({
+                      group_id: group,
+                      conversation_id: r.conversation_id,
+                      checklist_id: checklistId,
+                    });
                     return (
                       <tr key={r.conversation_id}>
                         <td>
@@ -505,6 +464,11 @@ export default function ConversationsPage() {
                           {e ? (
                             <>
                               <ScoreValue value={e.final_total} />
+                              {(failure || pendingRequest) && (
+                                <small className="cqa-cell-sub">
+                                  {failure ? 'Предыдущий результат' : 'Сохранённый результат'}
+                                </small>
+                              )}
                               {e.final_total !== e.original_total && (
                                 <small className="cqa-cell-sub">
                                   было {number(e.original_total)}
@@ -514,6 +478,8 @@ export default function ConversationsPage() {
                                 <small className="cqa-cell-sub">демо</small>
                               )}
                             </>
+                          ) : failure || pendingRequest ? (
+                            <span className="cqa-cell-muted">—</span>
                           ) : (
                             <StatusTag tone={history.length ? 'warning' : 'neutral'}>
                               {history.length ? 'Устарела' : 'Не оценён'}
@@ -528,7 +494,29 @@ export default function ConversationsPage() {
                           )}
                         </td>
                         <td>
-                          {e?.appeals_open ? (
+                          {pendingRequest ? (
+                            <>
+                              <StatusTag tone="warning">
+                                {pendingRequest.state === 'uncertain'
+                                  ? 'Нужна новая попытка'
+                                  : 'Результат не подтверждён'}
+                              </StatusTag>
+                              <p className="cqa-request-notice-text">{pendingRequest.message}</p>
+                            </>
+                          ) : failure ? (
+                            <>
+                              <StatusTag tone="danger">
+                                {e ? 'Ошибка повторной оценки' : 'Ошибка оценки'}
+                              </StatusTag>
+                              <details className="cqa-failure-note">
+                                <summary>Причина ошибки</summary>
+                                <p>{failure.reason}</p>
+                                <small>
+                                  {new Date(failure.created_at).toLocaleString('ru-RU')}
+                                </small>
+                              </details>
+                            </>
+                          ) : e?.appeals_open ? (
                             <StatusTag tone="warning">Апелляций: {e.appeals_open}</StatusTag>
                           ) : e?.status === 'needs_review' ? (
                             <StatusTag tone="warning">Проверить</StatusTag>
@@ -544,10 +532,13 @@ export default function ConversationsPage() {
                               size="sm"
                               variant="secondary"
                               loading={busyRows.has(r.conversation_id)}
-                              disabled={queue.running}
+                              disabled={queue.running || queue.starting}
                               onClick={() => void evaluate(row)}
                             >
-                              {e ? 'Переоценить' : 'Оценить'}
+                              {evaluationActionLabel(
+                                pendingRequest,
+                                failure ? 'Повторить оценку' : e ? 'Переоценить' : 'Оценить',
+                              )}
                             </Button>
                             {history.length > 0 && (
                               <button

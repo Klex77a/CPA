@@ -6,7 +6,7 @@
   "functions": {
     "api/index.js": {
       "maxDuration": 180,
-      "includeFiles": "{server.js,src/**,dist/**,docs/DEMO_SCRIPT.md,docs/benchmark-results/latest.json,test/fixtures/benchmark-cases.json,results/**}"
+      "includeFiles": "{server.js,src/**,dist/**,docs/DEMO_SCRIPT.md,docs/benchmark-results/latest.json,docs/benchmark-results/challenge-latest.json,docs/benchmark-results/challenge-review.json,test/fixtures/benchmark-cases.json,test/fixtures/benchmark-challenge-cases.json,results/**}"
     }
   },
   "routes": [

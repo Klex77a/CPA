@@ -238,6 +238,25 @@ describe('React conversation panels', () => {
       within(screen.getByRole('tabpanel')).getByText('Представляйтесь при начале диалога.'),
     ).toBeInTheDocument();
   });
+  it('shows unknown billing and observed lower bounds without fabricating zero usage', () => {
+    const evaluation = makeEvaluation();
+    evaluation.usage = null;
+    evaluation.cost_usd = null;
+    evaluation.billing_complete = false;
+    evaluation.unknown_call_count = 1;
+    evaluation.known_cost_usd = 0.01234;
+    evaluation.known_usage = { input: 100, output: 200, thoughts: 50 };
+    const { container } = render(<EvaluationPane {...evaluationProps(evaluation)} />);
+    const method = container.querySelector('.conversation-method') as HTMLElement;
+    fireEvent.click(within(method).getByText('Как рассчитан результат'));
+    expect(
+      within(method).getByText(/не менее \$0.0123; полная стоимость неизвестна/),
+    ).toBeVisible();
+    expect(
+      within(method).getByText(/Токены \(учтённый минимум\): 100 вход \/ 200 выход/),
+    ).toBeVisible();
+    expect(within(method).queryByText(/Токены: 0 вход \/ 0 выход/)).not.toBeInTheDocument();
+  });
 
   it('keeps the full print report independent of the active result tab', () => {
     const { container } = render(<EvaluationPane {...evaluationProps()} />);

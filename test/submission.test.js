@@ -11,9 +11,9 @@ const cfg = require('../src/config');
 const store = require('../src/store');
 const checklist = require('../src/default-checklist.json');
 const { prepareSubmission, inspectSubmission, submissionPath } = require('../src/submission-service');
-const { inspectBenchmark, getReadiness, benchmarkReportPath } = require('../src/readiness');
+const { inspectBenchmark, inspectRuntime, getReadiness, benchmarkReportPath } = require('../src/readiness');
 const { buildBenchmarkReport, aggregateBenchmark } = require('../src/benchmark');
-const { settingsFingerprint, PROMPT_VERSION } = require('../src/evaluator');
+const { settingsFingerprint, runtimeFingerprint, PROMPT_VERSION } = require('../src/evaluator');
 const { computeScore } = require('../src/scoring');
 const fixture = require('./fixtures/benchmark-cases.json');
 const transcript = [{ timestamp: '00:00', speaker: 'operator', text: 'Synthetic submission fixture.' }];
@@ -74,13 +74,26 @@ test('benchmark readiness requires current live metadata and internally consiste
     }));
     return { case_id: reference.id, evaluation: { criteria, original_result: computeScore(checklist, criteria), status: 'ok', provider: cfg.provider, model: cfg.model, prompt_version: PROMPT_VERSION, duration_ms: 10, cost_usd: 0 } };
   });
-  const report = buildBenchmarkReport(fixture, outcomes, { mode: 'live', provider: cfg.provider, model: cfg.model, prompt_version: PROMPT_VERSION, settings_fingerprint: settingsFingerprint() });
+  const report = buildBenchmarkReport(fixture, outcomes, { mode: 'live', provider: cfg.provider, model: cfg.model, prompt_version: PROMPT_VERSION, settings_fingerprint: settingsFingerprint(), runtime_fingerprint: runtimeFingerprint() });
   const directory = path.join(root, 'docs', 'benchmark-results'); fs.mkdirSync(directory, { recursive: true });
   const target = path.join(directory, 'latest.json');
   const write = (value) => fs.writeFileSync(target, JSON.stringify(value));
   write(report);
   assert.equal(benchmarkReportPath(root), target, 'versioned report works after a clean clone');
   assert.equal(inspectBenchmark({ root }).state, 'measured');
+  const originalRuntime = cfg.LLM_TIMEOUT_MS;
+  const originalScoreIdentity = JSON.stringify(settingsFingerprint());
+  cfg.LLM_TIMEOUT_MS = originalRuntime + 1000;
+  assert.equal(inspectBenchmark({ root }).state, 'runtime_changed');
+  assert.equal(inspectBenchmark({ root }).quality_state, 'measured');
+  assert.deepEqual(inspectBenchmark({ root }).runtime.differences, ['timeout_ms']);
+  assert.equal(JSON.stringify(settingsFingerprint()), originalScoreIdentity, 'runtime changes never invalidate the 65 cached score identities');
+  cfg.LLM_TIMEOUT_MS = originalRuntime;
+  const legacy = structuredClone(report); delete legacy.run.runtime_fingerprint;
+  write(legacy);
+  assert.equal(inspectBenchmark({ root }).state, 'runtime_unverified');
+  assert.equal(inspectBenchmark({ root }).quality_state, 'measured');
+  write(report);
   write({ ...report, run: { ...report.run, mode: 'offline' } });
   assert.equal(inspectBenchmark({ root }).state, 'unverified_run');
   write({ ...report, run: { ...report.run, prompt_version: 'old' } });
@@ -90,6 +103,11 @@ test('benchmark readiness requires current live metadata and internally consiste
   write(report);
   const readiness = getReadiness({ root });
   assert.equal(readiness.publication.state, 'not_verified');
+  assert.equal(readiness.benchmarks.regression.coverage.cases, 15);
+  assert.equal(readiness.benchmarks.challenge.state, 'not_run');
+  assert.equal(readiness.benchmarks.challenge.coverage.cases, 39);
+  assert.equal(readiness.benchmarks.challenge.coverage.labels, 312);
+  assert.equal(readiness.benchmarks.challenge.coverage.critical_by_language.KZ.positive, 3);
   assert.equal(readiness.demo.steps.reduce((sum, step) => sum + step.seconds, 0), 300);
 
   const mismatchOutcomes = structuredClone(outcomes);
@@ -129,6 +147,40 @@ test('benchmark readiness requires current live metadata and internally consiste
   write(report);
 });
 
+test('runtime comparison detects local versus Vercel limits without changing score identity', () => {
+  const oldLocalRun = { concurrency: 2, settings: { llm_timeout_ms: 240000, llm_max_attempts: 6, repair_attempts: 1, samples: 1 } };
+  const cloud = { version: 1, execution_mode: 'cloud-stepped', timeout_ms: 60000, max_attempts: 1, repair_attempts: 1, samples: 1, concurrency: 1 };
+  const comparison = inspectRuntime(oldLocalRun, cloud);
+  assert.equal(comparison.state, 'changed');
+  assert.deepEqual(comparison.differences, ['timeout_ms', 'max_attempts', 'concurrency']);
+  assert.equal(comparison.complete, false);
+  assert.equal(inspectRuntime({ runtime_fingerprint: cloud }, cloud).state, 'matched');
+  assert.throws(() => inspectRuntime({ runtime_fingerprint: { ...cloud, timeout_ms: -1 } }, cloud), /Invalid runtime fingerprint/);
+  assert.throws(() => inspectRuntime({ runtime_fingerprint: cloud, concurrency: 2 }, cloud), /Contradictory runtime concurrency/);
+  assert.throws(() => inspectRuntime({ runtime_fingerprint: cloud, settings: { llm_max_attempts: 6 } }, cloud), /Contradictory runtime max_attempts/);
+  assert.equal(inspectRuntime({ runtime_fingerprint: { ...cloud, execution_mode: 'direct-benchmark' } }, cloud).state, 'changed', 'direct evaluator timing is not an end-to-end deployed batch measurement');
+});
+
+test('post-hoc reference review is a fixture-bound warning and cannot alter measured agreement', () => {
+  const source = path.join(cfg.ROOT, 'docs', 'benchmark-results', 'challenge-review.json');
+  const review = JSON.parse(fs.readFileSync(source, 'utf8'));
+  const target = path.join(root, 'docs', 'benchmark-results', 'challenge-review.json');
+  fs.writeFileSync(target, JSON.stringify(review));
+  const challenge = inspectBenchmark({ root, suite: 'challenge' });
+  assert.equal(challenge.reference_review.state, 'disputed');
+  assert.equal(challenge.reference_review.disputed_label_count, 21);
+  assert.deepEqual(challenge.reference_review.findings_by_category, { reference_questionable: 9, boundary_disagreement: 10, model_risk: 2 });
+  assert.equal(challenge.reference_review.independent_expert_validation, false);
+  assert.equal(inspectBenchmark({ root }).reference_review, undefined, 'challenge errata cannot change regression interpretation');
+  const mismatch = structuredClone(review); mismatch.fixture_digest = '0'.repeat(64);
+  fs.writeFileSync(target, JSON.stringify(mismatch));
+  assert.equal(inspectBenchmark({ root, suite: 'challenge' }).reference_review, undefined);
+  const foreignCase = structuredClone(review); foreignCase.findings[0].case_id = 'not-in-frozen-fixture';
+  fs.writeFileSync(target, JSON.stringify(foreignCase));
+  assert.equal(inspectBenchmark({ root, suite: 'challenge' }).reference_review, undefined);
+  fs.writeFileSync(target, JSON.stringify(review));
+});
+
 test('the saved real report, when present, passes replay consistency with its recorded model settings', () => {
   const actualFile = path.join(cfg.ROOT, 'output', 'benchmark', 'latest.json');
   if (!fs.existsSync(actualFile)) return; // clean clones need no ignored live artifact
@@ -140,7 +192,7 @@ test('the saved real report, when present, passes replay consistency with its re
     fs.writeFileSync(target, JSON.stringify(actual));
     const status = inspectBenchmark({ root });
     assert.notEqual(status.state, 'blocked', 'the existing live report must not be rejected as corrupt');
-    if (JSON.stringify(actual.run.settings_fingerprint) === JSON.stringify(settingsFingerprint())) assert.equal(status.state, 'measured');
+    if (JSON.stringify(actual.run.settings_fingerprint) === JSON.stringify(settingsFingerprint())) assert.equal(status.quality_state, 'measured');
   } finally { Object.assign(cfg, previous); }
 });
 console.log(`submission: пройдено ${count}`);

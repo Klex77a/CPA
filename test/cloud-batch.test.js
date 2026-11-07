@@ -106,7 +106,7 @@ async function test(name, run) { await run(); passed++; console.log('✔', name)
     const final = await h.api.stepBatch(job.id);
     assert.equal(final.status, 'finished'); assert.equal(final.done, 3);
     assert.deepEqual(final.counts, { error: 2, done: 1 });
-    assert.equal(final.cost_usd, 0.005); assert.equal(final.unknown_cost_count, 1);
+    assert.equal(final.cost_usd, null); assert.equal(final.known_cost_usd, 0.005); assert.equal(final.billing_complete, false); assert.equal(final.unknown_cost_count, 1);
     assert.equal(h.failures.length, 2); assert.equal(h.failures[0].metrics.cost_usd, 0.003);
     assert.ok(!final.errors[0].error.includes('hidden-credential'));
     assert.match(final.errors[0].error, /REDACTED/);
@@ -145,6 +145,21 @@ async function test(name, run) { await run(); passed++; console.log('✔', name)
     const empty = setup(0); const done = empty.api.createBatch({ group_id: 'SYNTHETIC' });
     assert.equal(done.status, 'finished'); assert.equal(done.total, 0);
     await empty.api.stepBatch(done.id); assert.equal(empty.calls.length, 0);
+  });
+  await test('partial billed work remains a lower bound when later usage is unknown', async () => {
+    const h = setup(2);
+    h.setEvaluator(async (record) => {
+      if (record.conversation_id === 'case-0') throw Object.assign(new Error('Repair transport failed'), { evaluation_metrics: { usage: null, cost_usd: null, known_usage: { input: 10, output: 20, thoughts: 0 }, known_cost_usd: 0.003, billing_complete: false, unknown_call_count: 2 } });
+      return { id: 'known-second', status: 'ok', cost_usd: 0.002, billing_complete: true, duration_ms: 10 };
+    });
+    const job = h.api.createBatch({ group_id: 'SYNTHETIC' });
+    await h.api.stepBatch(job.id); const done = await h.api.stepBatch(job.id);
+    assert.equal(done.cost_usd, null); assert.equal(done.known_cost_usd, 0.005); assert.equal(done.billing_complete, false);
+    assert.equal(done.unknown_cost_count, 1); assert.equal(done.unknown_call_count, 2);
+    assert.equal(h.failures[0].metrics.known_cost_usd, 0.003);
+    const { costSummary } = require('../src/billing');
+    const summary = costSummary([{ cost_usd: 0.1 }, { cost_usd: null, known_cost_usd: 0.02, billing_complete: false, unknown_call_count: 2 }]);
+    assert.equal(summary.cost_usd, null); assert.equal(summary.known_cost_usd, 0.12); assert.equal(summary.unknown_cost_count, 1); assert.equal(summary.unknown_call_count, 2);
   });
   console.log(`cloud-batch: пройдено ${passed}`);
 })().catch((error) => { console.error(error); process.exitCode = 1; });

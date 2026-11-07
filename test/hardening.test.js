@@ -90,6 +90,23 @@ async function main() {
       assert.strictEqual(batch.body.skipped, 1);
     });
 
+    await test('локальный request_id повторяет сохранение без новой оценки и отклоняет изменённое намерение без PostgreSQL', async () => {
+      const group = 'LOCAL_IDEMPOTENCY';
+      await request('POST', '/datasets/upload', { group_id: group, payload: [sample] });
+      const body = { group_id: group, conversation_id: sample.conversation_id, checklist_id: 'default', force: true, request_id: 'local-stable-request' };
+      const first = await request('POST', '/evaluate', body);
+      assert.strictEqual(first.status, 200);
+      const replay = await request('POST', '/evaluate', body);
+      assert.strictEqual(replay.status, 200); assert.strictEqual(replay.body.id, first.body.id); assert.strictEqual(replay.body.cached, true);
+      assert.strictEqual(store.list('evaluations').filter(item => item.group_id === group).length, 1);
+      const changed = await request('POST', '/evaluate', { ...body, force: false });
+      assert.strictEqual(changed.status, 409); assert.strictEqual(changed.body.code, 'EVALUATION_INPUT_CHANGED');
+      const fresh = await request('POST', '/evaluate', { ...body, request_id: 'new-explicit-regrade' });
+      assert.strictEqual(fresh.status, 200); assert.notStrictEqual(fresh.body.id, first.body.id);
+      assert.strictEqual(store.list('evaluations').filter(item => item.group_id === group).length, 2);
+      assert.strictEqual(require.cache[require.resolve('../src/cloud-store')], undefined, 'local idempotency never imports a database adapter');
+    });
+
     await test('апелляция синхронизирует итог, вывод, статус и рекомендации, сохраняя исходную оценку', async () => {
       const cl = { id: 'appeal', name: 'Тест', version: 1, criteria: [{ id: 'a', title: 'Приветствие', type: 'binary', weight: 10 }] };
       const criteria = { a: { answer: 'NO', value: null, explanation: 'Не поздоровался.', evidence: [], issues: ['нужна проверка'], review_required: true } };

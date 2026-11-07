@@ -2,6 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import { api, ApiError } from '../api';
 import { useResource } from '../hooks';
 import { useWorkspace } from '../Workspace';
+import {
+  evaluateWithRequest,
+  evaluationActionLabel,
+  useEvaluationRequests,
+} from '../evaluationRequests';
 import type { Conversation, Evaluation, EvaluationSummary } from '../types';
 import TranscriptPane from './conversation/TranscriptPane';
 import EvaluationPane from './conversation/EvaluationPane';
@@ -113,10 +118,27 @@ export default function ConversationPage({ groupId, conversationId, evaluationId
     conversationOrder,
     refreshBase,
     notify,
+    evaluationRevision,
   } = useWorkspace();
-  const key = `${groupId}/${conversationId}/${evaluationId || ''}/${checklistId}`;
-  const requestKey = useRef(key);
-  requestKey.current = key;
+  const evaluationRequests = useEvaluationRequests();
+  const evaluationRequest = evaluationRequests.get({
+    group_id: groupId,
+    conversation_id: conversationId,
+    checklist_id: checklistId,
+  });
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const contextKey = `${groupId}/${conversationId}/${evaluationId || ''}/${checklistId}`;
+  const key = evaluationId ? contextKey : `${contextKey}/revision:${evaluationRevision}`;
+  const requestKey = useRef(contextKey);
+  requestKey.current = contextKey;
+  const retained = useRef<{ contextKey: string; data: CardData } | null>(null);
+  const sourceRecord = useRef<{ identity: string; record: Conversation } | null>(null);
   const [evaluating, setEvaluating] = useState(false);
   const [mobilePane, setMobilePane] = useState<'dialog' | 'evaluation'>('dialog');
   const [wide, setWide] = useState(
@@ -155,10 +177,20 @@ export default function ConversationPage({ groupId, conversationId, evaluationId
       : null;
     return { record, evaluation, history };
   });
+  if (resource.data) retained.current = { contextKey, data: resource.data };
+  const data =
+    resource.data ||
+    (retained.current?.contextKey === contextKey ? retained.current.data : undefined);
   const evaluation =
-    localEvaluation?.key === key ? localEvaluation.evaluation : resource.data?.evaluation || null;
-  const record = shownRecord(resource.data?.record || null, evaluation);
-  const history = resource.data?.history || [];
+    localEvaluation?.key === key ? localEvaluation.evaluation : data?.evaluation || null;
+  const source = shownRecord(data?.record || null, evaluation);
+  const identity = source ? JSON.stringify(source) : '';
+  if (source && sourceRecord.current?.identity !== identity)
+    sourceRecord.current = { identity, record: source };
+  // A background score refresh must not remount the audio element, clear transcript
+  // filters or seek back to an old evidence marker when the source is unchanged.
+  const record = source ? sourceRecord.current!.record : null;
+  const history = data?.history || [];
   const order = conversationOrder?.groupId === groupId ? conversationOrder.ids : [];
   const position = order.indexOf(conversationId);
   const previous = position > 0 ? order[position - 1] : null;
@@ -224,10 +256,10 @@ export default function ConversationPage({ groupId, conversationId, evaluationId
   }, [previous, next, groupId]);
 
   async function evaluate() {
-    const activeKey = key;
+    const activeKey = contextKey;
     setEvaluating(true);
     try {
-      const result = await api.post<Evaluation>('/evaluate', {
+      const result = await evaluateWithRequest<Evaluation>({
         group_id: groupId,
         conversation_id: conversationId,
         checklist_id: checklistId,
@@ -239,8 +271,10 @@ export default function ConversationPage({ groupId, conversationId, evaluationId
           : `Оценка ${conversationId} сохранена`,
         result.cached ? 'info' : 'success',
       );
-      await refreshBase();
-      if (requestKey.current !== activeKey) return;
+      await refreshBase().catch(() => {
+        // A confirmed evaluation remains successful when the workspace summary cannot refresh.
+      });
+      if (!mounted.current || requestKey.current !== activeKey) return;
       const target = cardPath(groupId, conversationId, result.id);
       if (location.hash.split('?')[0] === target) {
         setLocalEvaluation({ key, evaluation: result });
@@ -250,7 +284,7 @@ export default function ConversationPage({ groupId, conversationId, evaluationId
     } catch (failure) {
       notify(failure instanceof Error ? failure.message : 'Не удалось оценить диалог', 'error');
     } finally {
-      if (requestKey.current === activeKey) setEvaluating(false);
+      if (mounted.current && requestKey.current === activeKey) setEvaluating(false);
     }
   }
 
@@ -357,15 +391,15 @@ export default function ConversationPage({ groupId, conversationId, evaluationId
           </label>
           <button
             className="conversation-button primary"
-            disabled={evaluating || resource.loading || !resource.data?.record}
+            disabled={evaluating || resource.loading || !data?.record}
             onClick={evaluate}
           >
             {evaluating && <span className="conversation-spinner" />}
             {evaluating
               ? 'Оцениваем…'
               : evaluation?.checklist.id === checklistId
-                ? 'Переоценить'
-                : 'Оценить диалог'}
+                ? evaluationActionLabel(evaluationRequest, 'Переоценить')
+                : evaluationActionLabel(evaluationRequest, 'Оценить диалог')}
           </button>
           {evaluation && (
             <details className="conversation-more-menu">
@@ -404,12 +438,17 @@ export default function ConversationPage({ groupId, conversationId, evaluationId
           )}
         </div>
       </header>
-      {resource.loading && !resource.data ? (
+      {evaluationRequest && (
+        <div className="conversation-notice warning" role="status">
+          {evaluationRequest.message}
+        </div>
+      )}
+      {resource.loading && !data ? (
         <div className="conversation-loading" role="status">
           <span className="conversation-spinner" />
           Открываем диалог и оценку…
         </div>
-      ) : resource.error ? (
+      ) : resource.error && !data ? (
         <div className="conversation-empty conversation-page-error" role="alert">
           <h2>Не удалось открыть диалог</h2>
           <p>{resource.error.message}</p>
@@ -435,6 +474,15 @@ export default function ConversationPage({ groupId, conversationId, evaluationId
         </div>
       ) : (
         <>
+          {resource.error && (
+            <div className="conversation-notice warning" role="status">
+              Не удалось обновить оценку: {resource.error.message}. Показан последний загруженный
+              результат.{' '}
+              <button className="conversation-text-button" onClick={resource.reload}>
+                Повторить
+              </button>
+            </div>
+          )}
           <div className="conversation-mobile-tabs" role="tablist" aria-label="Панели карточки">
             <button
               role="tab"

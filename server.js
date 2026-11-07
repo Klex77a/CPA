@@ -14,11 +14,12 @@ const { audioSegments } = require('./src/audio-offsets');
 const { validateChecklist, validateAnswer, AnswerError } = require('./src/scoring');
 const { buildSubmission } = require('./src/result-export');
 const { fetchAudioPage, assertAudioPageUrl } = require('./src/audio-access');
-const { saveEvaluationFailure } = require('./src/evaluation-failure');
+const { saveEvaluationFailure, currentFailureSummaries } = require('./src/evaluation-failure');
 const { evaluationFreshness } = require('./src/evaluation-freshness');
 const { getReadiness, inspectBenchmark, benchmarkReportPath } = require('./src/readiness');
 const { authorize, isSameOrigin } = require('./src/access');
 const { HttpBuffer } = require('./src/http-buffer');
+const { costSummary, addJobCost } = require('./src/billing');
 
 // ---------- начальный чек-лист ----------
 // Исходный чек-лист из PDF лежит в src/default-checklist.json и копируется в data/ при первом запуске.
@@ -35,7 +36,7 @@ function send(res, status, body, headers = {}) {
   res.writeHead(status, { 'Content-Type': isStr ? 'text/plain; charset=utf-8' : 'application/json; charset=utf-8', ...headers });
   res.end(isStr ? body : JSON.stringify(body));
 }
-const fail = (res, status, msg) => send(res, status, { error: msg });
+const fail = (res, status, msg, code) => send(res, status, { error: msg, ...(code ? { code } : {}) });
 
 function readBody(req, limit = 20 * 1024 * 1024) {
   const parse = (value) => {
@@ -230,10 +231,11 @@ async function runBatch(job, records, checklist, force) {
       try {
         const ev = await evaluate(rec, checklist, job.group_id, { force, queue_ms: queueMs });
         store.write('evaluations', ev.id, ev);
-        job.cost_usd += ev.cost_usd;
+        addJobCost(job, ev);
         item.status = ev.status === 'needs_review' ? 'needs_review' : 'done';
         item.ms = ev.duration_ms;
       } catch (e) {
+        addJobCost(job, e.evaluation_metrics);
         saveEvaluationFailure(rec, checklist, job.group_id, e);
         item.status = 'error';
         item.error = e.message;
@@ -384,7 +386,7 @@ function analytics(groupId, checklistId) {
     appeals_open: evs.reduce((s, e) => s + e.appeals.filter((a) => a.status === 'open').length, 0),
     appeals_total: evs.reduce((s, e) => s + e.appeals.length, 0),
     changed_by_appeal: evs.filter((e) => e.final_result.total !== e.original_result.total).length,
-    cost_usd: Math.round(evs.reduce((s, e) => s + (e.cost_usd || 0), 0) * 10000) / 10000,
+    ...costSummary(evs),
     low_confidence: evs.reduce((s, e) => s + Object.values(e.final_criteria).filter((c) => c.agreement && c.agreement.runs > 1 && c.agreement.agree < c.agreement.runs).length, 0),
     languages: langs, by_language: groupAvg('language'), by_channel: groupAvg('channel'),
     distribution: buckets, criteria, operators,
@@ -409,10 +411,18 @@ async function handleApi(req, res, url) {
 
   if (p[0] === 'readiness' && p.length === 1 && m === 'GET') return send(res, 200, getReadiness(), { 'Cache-Control': 'no-store' });
   if (p[0] === 'benchmark' && p[1] === 'report' && p.length === 2 && m === 'GET') {
-    const status = inspectBenchmark();
+    const suite = q.suite || 'regression';
+    if (!['regression', 'challenge'].includes(suite)) return fail(res, 400, 'Неизвестный набор проверки');
+    const status = inspectBenchmark({ suite });
     if (status.state === 'not_run') return fail(res, 404, status.message);
     if (status.state === 'blocked') return fail(res, 422, status.message);
-    return send(res, 200, fs.readFileSync(benchmarkReportPath()), { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': 'attachment; filename="benchmark-report.json"', 'Cache-Control': 'no-store' });
+    return send(res, 200, fs.readFileSync(benchmarkReportPath(cfg.ROOT, suite)), { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': `attachment; filename="${suite === 'regression' ? 'benchmark-report' : 'benchmark-challenge'}.json"`, 'Cache-Control': 'no-store' });
+  }
+  if (p[0] === 'benchmark' && p[1] === 'reference-review' && p.length === 2 && m === 'GET') {
+    if (q.suite !== 'challenge') return fail(res, 400, 'Ревью разметки доступно для challenge');
+    const location = path.join(cfg.ROOT, 'docs', 'benchmark-results', 'challenge-review.json');
+    if (!fs.existsSync(location)) return fail(res, 404, 'Ревью разметки ещё не опубликовано');
+    return send(res, 200, fs.readFileSync(location), { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   }
   if (p[0] === 'demo-guide' && p.length === 1 && m === 'GET') {
     return send(res, 200, fs.readFileSync(path.join(cfg.ROOT, 'docs', 'DEMO_SCRIPT.md')), { 'Content-Type': 'text/markdown; charset=utf-8', 'Content-Disposition': 'attachment; filename="Midnight-Commit-demo.md"' });
@@ -460,6 +470,8 @@ async function handleApi(req, res, url) {
       const ds = store.read('datasets', p[1]);
       if (!ds) return fail(res, 404, 'Набор не найден');
       const evs = store.list('evaluations').filter((e) => e.group_id === p[1]).sort(compareEvals);
+      const failures = store.list('failures').filter((failure) => failure.group_id === p[1]);
+      const checklists = store.list('checklists');
       return send(res, 200, {
         group_id: ds.group_id,
         fetched_at: ds.fetched_at,
@@ -470,6 +482,7 @@ async function handleApi(req, res, url) {
           messages: r.transcript.length,
           has_audio: !!r.audio_url,
           evaluations: evs.filter((e) => e.conversation_id === r.conversation_id).map(evalSummary),
+          failures: currentFailureSummaries(r, failures, evs, checklists),
         })),
       });
     }
@@ -524,6 +537,7 @@ async function handleApi(req, res, url) {
   // (диалог + содержимое/версия чек-листа + модель/настройки + версия инструкций). force=true — новая оценка.
   if (p[0] === 'evaluate' && m === 'POST') {
     const b = await readBody(req);
+    if (store.cloudMode || b.request_id !== undefined) return send(res, 200, await require('./src/cloud-evaluation').perform(b));
     const rec = getRecord(b.group_id, b.conversation_id);
     if (!rec) return fail(res, 404, 'Диалог не найден — сначала загрузите набор');
     const cl = store.read('checklists', b.checklist_id || 'default');
@@ -563,6 +577,7 @@ async function handleApi(req, res, url) {
         records = records.filter((record) => selected.has(record.conversation_id));
       }
       const job = { id: store.newId('job'), group_id: b.group_id, checklist_id: cl.id, checklist_version: cl.version, total: records.length, done: 0, skipped: 0, errors: [], cost_usd: 0, status: 'running', started_at: new Date().toISOString(), t0: Date.now(), items: Object.fromEntries(records.map((r) => [r.conversation_id, { status: 'queued' }])) };
+      Object.assign(job, { known_cost_usd: 0, unknown_cost_count: 0, unknown_call_count: 0, billing_complete: true });
       jobs.set(job.id, job);
       runBatch(job, records, cl, !!b.force).catch((e) => {
         job.status = 'failed';
@@ -744,7 +759,8 @@ async function dispatch(req, res) {
     // Ошибки входных данных ожидаемы; не засоряем журнал их stack trace.
     if (!e.status || e.status >= 500) console.error(e);
     const st = Number.isInteger(e.status) && e.status >= 400 && e.status < 600 ? e.status : e.status ? 502 : 500;
-    return fail(res, st, e.message || 'Ошибка сервера');
+    const publicCode = /^EVALUATION_(IN_PROGRESS|UNCERTAIN|FAILED|INPUT_CHANGED|RESULT_REMOVED|NOT_FOUND)$/.test(e.code || '') ? e.code : undefined;
+    return fail(res, st, e.message || 'Ошибка сервера', publicCode);
   }
 }
 
@@ -752,6 +768,12 @@ async function handler(req, res) {
   if (!authorize(req, res, cfg)) return;
   // Static assets need no workspace transaction; they still require authorization.
   if (!store.cloudMode || !req.url.split('?')[0].startsWith('/api/')) return dispatch(req, res);
+  // Paid routes manage their own short claim/finalization transactions. Dispatch
+  // still applies the same origin/validation boundary before any claim is made.
+  let route = [];
+  try { route = new URL(req.url, 'http://localhost').pathname.replace(/^\/api/, '').split('/').filter(Boolean).map(decodeURIComponent); }
+  catch (_) { /* dispatch returns the normal malformed-URL response */ }
+  if (req.method === 'POST' && (route[0] === 'evaluate' || route[0] === 'batch' && route.length === 3 && route[2] === 'step')) return dispatch(req, res);
   const response = new HttpBuffer();
   try {
     const { withCloudStore } = require('./src/cloud-store');

@@ -1,4 +1,5 @@
 'use strict';
+const { addJobCost } = require('../src/billing');
 // Planning is the default. Only --live can call the configured model.
 class RunnerInputError extends Error {}
 
@@ -66,7 +67,7 @@ async function runDataset(options, dependencies = {}) {
   const summary = {
     mode: options.live ? 'live' : 'dry-run', group: options.group, checklist: options.checklist,
     total: dataset.records.length, planned: 0, skipped: 0, review_blocked: 0,
-    done: 0, needs_review: 0, failed: 0, cost_usd: 0, unknown_cost_count: 0,
+    done: 0, needs_review: 0, failed: 0, cost_usd: 0, known_cost_usd: 0, billing_complete: true, unknown_cost_count: 0, unknown_call_count: 0,
     http_attempts: 0, model_calls: 0,
   };
   for (const record of dataset.records) {
@@ -89,8 +90,7 @@ async function runDataset(options, dependencies = {}) {
   if (cfg.provider === 'mock' && planned.length) throw new RunnerInputError('Для --live нужна настоящая настроенная модель; демо-эвристика не создаёт результаты сдачи');
 
   const account = (metrics) => {
-    if (finite(metrics?.cost_usd)) summary.cost_usd += metrics.cost_usd;
-    else summary.unknown_cost_count++;
+    addJobCost(summary, metrics);
     if (finite(metrics?.timing?.http_attempts)) summary.http_attempts += metrics.timing.http_attempts;
     if (Array.isArray(metrics?.timing?.calls)) summary.model_calls += metrics.timing.calls.length;
   };
@@ -121,10 +121,9 @@ async function runDataset(options, dependencies = {}) {
       }
     }
   }));
-  summary.cost_usd = Number(summary.cost_usd.toFixed(6));
   summary.duration_ms = now() - started;
   summary.exitCode = summary.failed || summary.needs_review || summary.review_blocked ? 1 : 0;
-  log(`FINISHED total=${summary.total} done=${summary.done} skipped=${summary.skipped} review_blocked=${summary.review_blocked} needs_review=${summary.needs_review} failed=${summary.failed} observed_cost=$${summary.cost_usd.toFixed(6)} unknown_cost=${summary.unknown_cost_count} model_calls=${summary.model_calls} http_attempts=${summary.http_attempts}`);
+  log(`FINISHED total=${summary.total} done=${summary.done} skipped=${summary.skipped} review_blocked=${summary.review_blocked} needs_review=${summary.needs_review} failed=${summary.failed} observed_cost_lower_bound=$${summary.known_cost_usd.toFixed(6)} billing_complete=${summary.billing_complete} unknown_cost=${summary.unknown_cost_count} model_calls=${summary.model_calls} http_attempts=${summary.http_attempts}`);
   return summary;
 }
 

@@ -137,6 +137,16 @@ export interface EvaluationSummary {
   record_changed?: boolean;
   stale_reasons?: string[];
 }
+export interface EvaluationFailureSummary {
+  id: string;
+  conversation_id: string;
+  group_id: string;
+  status: 'error';
+  created_at: string;
+  checklist: Pick<Checklist, 'id' | 'version'>;
+  reason: string;
+  error_status?: string | number;
+}
 export interface Conversation {
   conversation_id: string;
   channel: string;
@@ -146,6 +156,7 @@ export interface Conversation {
   audio_segments?: ({ start: number; end: number } | null)[];
   messages?: number;
   evaluations?: EvaluationSummary[];
+  failures?: EvaluationFailureSummary[];
 }
 export interface ConversationSummary extends Omit<Conversation, 'transcript'> {
   transcript?: TranscriptTurn[];
@@ -162,6 +173,11 @@ export interface Dataset {
   group_id: string;
   total_records?: number;
   records: ConversationSummary[];
+}
+export interface TokenUsage {
+  input: number;
+  output: number;
+  thoughts: number;
 }
 export interface Evaluation {
   id: string;
@@ -189,7 +205,11 @@ export interface Evaluation {
   global_validation_errors?: string[];
   duration_ms: number;
   cost_usd: number | null;
-  usage: { input: number; output: number; thoughts: number };
+  usage: TokenUsage | null;
+  known_usage?: TokenUsage;
+  known_cost_usd?: number;
+  billing_complete?: boolean;
+  unknown_call_count?: number;
   timing?: {
     total_ms: number;
     llm_ms: number;
@@ -227,8 +247,11 @@ export interface BatchJob {
   total: number;
   done: number;
   skipped: number;
-  cost_usd: number;
+  cost_usd: number | null;
+  known_cost_usd?: number;
+  billing_complete?: boolean;
   unknown_cost_count?: number;
+  unknown_call_count?: number;
   status: 'running' | 'finished' | 'failed' | 'cancelled';
   errors: { conversation_id?: string; error: string }[];
   counts?: Record<string, number>;
@@ -278,7 +301,11 @@ export interface Analytics {
   appeals_open: number;
   appeals_total: number;
   changed_by_appeal: number;
-  cost_usd: number;
+  cost_usd: number | null;
+  known_cost_usd?: number;
+  billing_complete?: boolean;
+  unknown_cost_count?: number;
+  unknown_call_count?: number;
   low_confidence: number;
   languages: string[];
   by_language: Record<string, { avg: number | null; n: number }>;
@@ -314,21 +341,63 @@ export interface SubmissionState {
   errors: number;
   message: string;
 }
-export interface Readiness {
-  benchmark: {
+export interface BenchmarkCoverage {
+  cases: number;
+  labels: number;
+  languages: Record<string, number>;
+  channels?: Record<string, number>;
+  label_distribution?: Record<string, Record<string, number>>;
+  critical_by_language?: Record<
+    string,
+    { positive: number; negative: number; types: Record<string, number> }
+  >;
+  source_turns?: number;
+  max_source_turns?: number;
+  measured?: boolean;
+}
+export interface BenchmarkStatus {
+  state: string;
+  quality_state?: string;
+  runtime_state?: string;
+  suite?: string;
+  message: string;
+  model?: string;
+  case_count?: number;
+  generated_at?: string;
+  independent_expert_validation?: boolean;
+  coverage?: BenchmarkCoverage;
+  reference_review?: {
     state: string;
-    message: string;
-    model?: string;
+    summary?: string;
+    disputed_label_count?: number;
     case_count?: number;
-    metrics?: {
-      criterion_match: { rate: number; matched: number; total: number };
-      by_language: Record<string, { matched: number; total: number }>;
-      cases: { failed: number; invalid: number };
-      critical: { tp: number; expected_positive: number; fp: number; unknown: number };
-      timing: { p50_ms: number | null };
-      cost: { total_usd: number; complete: boolean };
+    findings_by_category?: Record<string, number>;
+  };
+  runtime?: {
+    state: string;
+    complete?: boolean;
+    differences?: string[];
+    note?: string;
+    recorded?: Record<string, unknown>;
+    current?: Record<string, unknown>;
+  };
+  metrics?: {
+    criterion_match: { rate: number | null; matched: number; total: number };
+    by_language: Record<string, { matched: number; total: number }>;
+    cases: { failed: number; invalid: number };
+    critical: { tp: number; expected_positive: number; fp: number; unknown: number };
+    timing: { p50_ms: number | null };
+    cost: {
+      total_usd: number | null;
+      known_total_usd?: number;
+      complete: boolean;
+      unknown_call_count?: number;
     };
   };
+}
+export interface Readiness {
+  benchmark: BenchmarkStatus;
+  benchmarks?: { regression?: BenchmarkStatus; challenge?: BenchmarkStatus };
   submissions: SubmissionState[];
   publication: { state: string; message: string };
   demo: { total_seconds: number; steps: { seconds: number; title: string; detail: string }[] };

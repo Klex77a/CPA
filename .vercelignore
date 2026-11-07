@@ -16,11 +16,14 @@ docs/*
 !docs/benchmark-results
 docs/benchmark-results/*
 !docs/benchmark-results/latest.json
+!docs/benchmark-results/challenge-latest.json
+!docs/benchmark-results/challenge-review.json
 !test
 test/*
 !test/fixtures
 test/fixtures/*
 !test/fixtures/benchmark-cases.json
+!test/fixtures/benchmark-challenge-cases.json
 !results
 results/*
 !results/dev

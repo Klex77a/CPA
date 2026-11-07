@@ -333,6 +333,10 @@ function settingsFingerprint() {
   if (endpoint && endpoint.replace(/\/+$/, '') !== standardEndpoint) settings.endpoint_hash = sha(endpoint.replace(/\/+$/, ''));
   return settings;
 }
+/** Operational limits are measured separately from scoring/cache identity. */
+function runtimeFingerprint() {
+  return { version: 1, execution_mode: cfg.CLOUD_MODE ? 'cloud-stepped' : 'local', timeout_ms: cfg.LLM_TIMEOUT_MS, max_attempts: cfg.LLM_MAX_ATTEMPTS, repair_attempts: cfg.REPAIR_ATTEMPTS, samples: cfg.provider === 'mock' ? 1 : cfg.SAMPLES, concurrency: cfg.CLOUD_MODE ? 1 : cfg.CONCURRENCY };
+}
 function checklistContent(cl) {
   return { name: cl.name, notes: cl.notes || '', rounding: cl.rounding, sections: cl.sections || [], criteria: cl.criteria };
 }
@@ -371,12 +375,12 @@ async function runOnce(record, checklist, timing) {
     try {
       res = await llm.complete(system, prompt, schema);
     } catch (e) {
-      timing.calls.push({ kind: attempt ? 'repair' : 'initial', ok: false, ...(e.metrics || {}), usage: measuredUsage(e.metrics?.usage), error: safeFailureMessage(e).slice(0, 160), ms: Date.now() - t0 });
+      timing.calls.push({ kind: attempt ? 'repair' : 'initial', ok: false, ...(e.metrics || {}), ...callAccounting(e.metrics?.usage, e.metrics), error: safeFailureMessage(e).slice(0, 160), ms: Date.now() - t0 });
       throw e;
     }
-    const callUsage = measuredUsage(res.usage);
-    usage = addUsage(usage, callUsage);
-    const call = { kind: attempt ? 'repair' : 'initial', ok: true, ...res.metrics, usage: callUsage, ms: Date.now() - t0 };
+    const accounting = callAccounting(res.usage, res.metrics);
+    usage = addUsage(usage, accounting.known_usage);
+    const call = { kind: attempt ? 'repair' : 'initial', ok: true, ...res.metrics, ...accounting, ms: Date.now() - t0 };
     timing.calls.push(call);
     const v0 = Date.now();
     try { parsed = llm.parseJson(res.text); } catch (e) { parsed = null; }
@@ -410,14 +414,22 @@ function measuredUsage(usage) {
 function addUsage(a, b) {
   return { input: a.input + b.input, output: a.output + b.output, thoughts: a.thoughts + b.thoughts };
 }
+function callAccounting(usage, metrics = {}) {
+  const reported = usage && ['input', 'output'].every(key => typeof usage[key] === 'number' && Number.isFinite(usage[key]) && usage[key] >= 0) && (usage.thoughts === undefined || typeof usage.thoughts === 'number' && Number.isFinite(usage.thoughts) && usage.thoughts >= 0) && metrics?.usage_reported !== false;
+  const attempts = Number.isSafeInteger(metrics?.http_attempts) ? Math.max(0, metrics.http_attempts) : 1;
+  const unknown = Math.max(Number.isSafeInteger(metrics?.unknown_call_count) ? metrics.unknown_call_count : 0, reported ? 0 : attempts);
+  const known = measuredUsage(usage);
+  return { usage: reported ? known : null, known_usage: known, unknown_call_count: unknown, billing_complete: unknown === 0 };
+}
 function measuredWork(timing, startedAt, samples, successfulSamples) {
-  const usage = timing.calls.reduce((total, call) => addUsage(total, measuredUsage(call.usage)), { input: 0, output: 0, thoughts: 0 });
+  const knownUsage = timing.calls.reduce((total, call) => addUsage(total, measuredUsage(call.known_usage || call.usage)), { input: 0, output: 0, thoughts: 0 });
+  const unknownCalls = timing.calls.reduce((sum, call) => sum + (call.unknown_call_count || 0), 0);
   timing.total_ms = Date.now() - startedAt;
   timing.llm_ms = timing.calls.reduce((sum, call) => sum + (call.request_ms || 0), 0);
   timing.retry_wait_ms = timing.calls.reduce((sum, call) => sum + (call.wait_ms || 0), 0);
   timing.http_attempts = timing.calls.reduce((sum, call) => sum + (call.http_attempts || 0), 0);
-  const cost = (usage.input * cfg.PRICE_IN_PER_M + (usage.output + usage.thoughts) * cfg.PRICE_OUT_PER_M) / 1e6;
-  return { usage, cost_usd: round(cost, 6), duration_ms: timing.total_ms, timing, samples, successful_samples: successfulSamples };
+  const cost = round((knownUsage.input * cfg.PRICE_IN_PER_M + (knownUsage.output + knownUsage.thoughts) * cfg.PRICE_OUT_PER_M) / 1e6, 6);
+  return { usage: unknownCalls ? null : knownUsage, cost_usd: unknownCalls ? null : cost, known_usage: knownUsage, known_cost_usd: cost, billing_complete: unknownCalls === 0, unknown_call_count: unknownCalls, duration_ms: timing.total_ms, timing, samples, successful_samples: successfulSamples };
 }
 
 /** Keep the chosen proof, errors and coaching from the same sample. */
@@ -450,7 +462,7 @@ const inflight = new Map();
 function evaluate(record, checklist, groupId, opts = {}) {
   const key = cacheKey(record, checklist);
   // Результат содержит историю апелляций группы, поэтому объединяем только запросы этой группы.
-  const requestKey = JSON.stringify([groupId, key]);
+  const requestKey = JSON.stringify([groupId, key, opts.operation_id || null]);
   if (inflight.has(requestKey)) return inflight.get(requestKey);
   const p = doEvaluate(record, checklist, groupId, key, opts).finally(() => inflight.delete(requestKey));
   inflight.set(requestKey, p);
@@ -487,6 +499,7 @@ async function doEvaluate(record, checklist, groupId, key, opts) {
       const cause = runs[0].reason;
       const error = new Error(cfg.SAMPLES === 1 ? safeFailureMessage(cause) : 'Все прогоны модели завершились ошибкой');
       if (cfg.SAMPLES === 1 && cause?.status != null) error.status = cause.status;
+      if (cfg.SAMPLES === 1 && /^PROVIDER_[A-Z0-9_]+$/.test(cause?.code || '')) error.code = cause.code;
       error.evaluation_metrics = measuredWork(timing, t0, cfg.SAMPLES, 0);
       throw error;
     }
@@ -504,8 +517,8 @@ async function doEvaluate(record, checklist, groupId, key, opts) {
   const globalErrors = (v.errors || []).filter((error) => !checklist.criteria.some((criterion) => criterion.id === error.criterion)).map((error) => error.message);
   const needsReview = (v.errors || []).length > 0 || Object.values(criteria).some((x) => x.review_required);
   const work = measuredWork(timing, t0, cfg.provider === 'mock' ? 1 : cfg.SAMPLES, successfulSamples);
-  const usage = work.usage;
-  console.log(`[eval] ${record.conversation_id}: ${(timing.total_ms / 1000).toFixed(1)} с, вызовов ${timing.calls.length}, HTTP-попыток ${timing.http_attempts}, ожидание повторов ${(timing.retry_wait_ms / 1000).toFixed(1)} с, токены in/out/think ${usage.input}/${usage.output}/${usage.thoughts}${needsReview ? ', ТРЕБУЕТ ПРОВЕРКИ' : ''}`);
+  const usage = work.known_usage;
+  console.log(`[eval] ${record.conversation_id}: ${(timing.total_ms / 1000).toFixed(1)} с, вызовов ${timing.calls.length}, HTTP-попыток ${timing.http_attempts}, ожидание повторов ${(timing.retry_wait_ms / 1000).toFixed(1)} с, наблюдённые токены in/out/think ${usage.input}/${usage.output}/${usage.thoughts}${work.billing_complete ? '' : `, расход неполный: попыток без usage ${work.unknown_call_count}`}${needsReview ? ', ТРЕБУЕТ ПРОВЕРКИ' : ''}`);
 
   return {
     id: `${groupId}__${record.conversation_id}__${checklist.id}__v${checklist.version}__${key.slice(0, 10)}${opts.force ? '__' + crypto.randomBytes(6).toString('hex') : ''}`,
@@ -530,8 +543,12 @@ async function doEvaluate(record, checklist, groupId, key, opts) {
     created_at: new Date().toISOString(),
     duration_ms: timing.total_ms,
     timing,
-    usage,
+    usage: work.usage,
     cost_usd: work.cost_usd,
+    known_usage: work.known_usage,
+    known_cost_usd: work.known_cost_usd,
+    billing_complete: work.billing_complete,
+    unknown_call_count: work.unknown_call_count,
     knowledge_base: null,
     operator_name: v.operator_name || null,
     coaching,
@@ -570,4 +587,4 @@ function recompute(evaluation) {
   return evaluation;
 }
 
-module.exports = { evaluate, recompute, cacheKey, settingsFingerprint, validateOutput, buildUserPrompt, buildSchema, buildSummary, computeFacts, vote, SYSTEM_PROMPT, PROMPT_VERSION };
+module.exports = { evaluate, recompute, cacheKey, settingsFingerprint, runtimeFingerprint, validateOutput, buildUserPrompt, buildSchema, buildSummary, computeFacts, vote, SYSTEM_PROMPT, PROMPT_VERSION };

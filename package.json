@@ -19,12 +19,15 @@
     "pretest": "npm run build",
     "validate:results": "node scripts/validate-results.js",
     "benchmark": "node scripts/benchmark.js",
+    "benchmark:challenge": "node scripts/benchmark.js --suite challenge",
+    "review:quality": "node scripts/review-quality.js",
+    "check:cloud-concurrency": "node scripts/check-cloud-concurrency.js",
     "benchmark:live": "node scripts/benchmark.js --live --out output/benchmark/latest.json",
     "evaluate:dataset": "node scripts/evaluate-dataset.js",
     "prepare:results": "node scripts/prepare-results.js",
     "check:readiness": "node scripts/check-readiness.js",
     "migrate:workspace": "node scripts/migrate-workspace.js",
-    "test": "node test/scoring.test.js && node test/validation.test.js && node test/pipeline.test.js && node test/deepseek.test.js && node test/results.test.js && node test/hardening.test.js && node test/export.test.js && node test/audio-access.test.js && node test/evaluation-failure.test.js && node test/appeals-concurrency.test.js && node test/freshness.test.js && node test/analytics.test.js && node test/batch-selection.test.js && node test/core-review.test.js && node test/benchmark.test.js && node test/submission.test.js && node test/dataset-runner.test.js && node test/cloud-store.test.js && node test/cloud-batch.test.js && node test/hosting.test.js && node test/vercel-package.test.js && node test/workspace-transfer.test.js && npm run test:ui"
+    "test": "node test/scoring.test.js && node test/validation.test.js && node test/pipeline.test.js && node test/deepseek.test.js && node test/results.test.js && node test/hardening.test.js && node test/export.test.js && node test/audio-access.test.js && node test/evaluation-failure.test.js && node test/appeals-concurrency.test.js && node test/freshness.test.js && node test/analytics.test.js && node test/batch-selection.test.js && node test/core-review.test.js && node test/benchmark.test.js && node test/submission.test.js && node test/dataset-runner.test.js && node test/cloud-store.test.js && node test/cloud-batch.test.js && node test/hosting.test.js && node test/vercel-package.test.js && node test/workspace-transfer.test.js && node test/cloud-concurrency-cli.test.js && node test/human-review.test.js && npm run test:ui"
   },
   "engines": {
     "node": ">=22.12.0"

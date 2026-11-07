@@ -7,8 +7,8 @@ const { execFileSync, spawnSync } = require('child_process');
 const fixture = require('./fixtures/benchmark-cases.json');
 const checklist = require('../src/default-checklist.json');
 const { computeScore } = require('../src/scoring');
-const { validateBenchmarkCases, compareEvaluation, aggregateBenchmark, buildBenchmarkReport, digest } = require('../src/benchmark');
-const { parseArgs } = require('../scripts/benchmark');
+const { validateBenchmarkCases, compareEvaluation, aggregateBenchmark, buildBenchmarkReport, referenceCoverage, digest } = require('../src/benchmark');
+const { parseArgs, assertOutputTarget, failureCode } = require('../scripts/benchmark');
 const clone = (value) => JSON.parse(JSON.stringify(value));
 let passed = 0;
 function test(name, fn) { fn(); passed++; console.log('✔', name); }
@@ -198,6 +198,87 @@ test('dry-run creates no model report; offline replay includes all missing cases
     assert.strictEqual(JSON.parse(saved).metrics.cases.failed, 15);
     assert.strictEqual(JSON.parse(saved).run.mode, 'offline');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('frozen regression stays unchanged and expanded challenge covers every requested new class in each language', () => {
+  assert.equal(digest(fixture), '1a36ffc9a14e2511137003b3ce3e8a8f16ce9e44eeb3e4e06b27ab577e9de0cf');
+  const challenge = require('./fixtures/benchmark-challenge-cases.json');
+  assert.deepEqual(validateBenchmarkCases(challenge), []);
+  const coverage = referenceCoverage(challenge);
+  assert.equal(coverage.cases, 39);
+  assert.equal(coverage.labels, 312);
+  assert.deepEqual(coverage.languages, { RU: 13, KZ: 13, EN: 13 });
+  for (const language of ['RU', 'KZ', 'EN']) {
+    assert.equal(coverage.critical_by_language[language].positive, 3);
+    assert.deepEqual(coverage.critical_by_language[language].types, { insult: 1, 'private-paid': 1, 'confidential-disclosure': 1 });
+    const cases = challenge.cases.filter(reference => reference.record.language === language);
+    for (const value of [0, 5, 10, 15, 20, null]) assert(cases.some(reference => reference.expected.c04.value === value));
+    for (const value of [true, false, null]) assert(cases.some(reference => reference.expected.c02.value === value));
+    assert(cases.some(reference => reference.expected.c06.value === 0));
+    const voice = cases.find(reference => reference.record.channel === 'voice call');
+    assert(voice.record.transcript.length >= 80);
+    assert.deepEqual(new Set(voice.record.transcript.map(turn => turn.speaker)), new Set(['bot', 'client', 'system', 'operator']));
+    assert.equal(voice.record.audio_url, null, 'simulated transcript is never presented as a real audio benchmark');
+  }
+  const damaged = clone(challenge);
+  damaged.cases.find(reference => reference.id === 'kz-challenge-critical-confidential').tags = [];
+  assert(validateBenchmarkCases(damaged).some(error => error.includes('KZ critical confidential-disclosure missing')));
+});
+
+test('critical predictions with invalid evidence or review flags remain unknown and cannot inflate recall', () => {
+  const positive = fixture.cases.find(reference => reference.expected.c08.value === true);
+  for (const mutate of [
+    answer => { answer.evidence = [{ msg: 999 }]; answer.checked_range = null; },
+    answer => { answer.review_required = true; answer.issues = ['Manual review required']; },
+  ]) {
+    const evaluation = evaluationFor(positive); mutate(evaluation.criteria.c08);
+    const report = aggregateBenchmark([compareEvaluation(positive, evaluation)]);
+    assert.equal(report.critical.tp, 0);
+    assert.equal(report.critical.unknown_positive, 1);
+    assert.equal(report.critical.recall_denominator, 1);
+    assert.equal(report.critical.recall, 0);
+    assert.equal(report.cases.invalid, 1);
+  }
+});
+
+test('challenge dry-run has no paid calls or fabricated quality report and cannot overwrite frozen evidence', () => {
+  assert.equal(parseArgs(['--suite', 'challenge', '--plan']).suite, 'challenge');
+  assert.throws(() => parseArgs(['--suite', 'unknown']), /regression or challenge/);
+  assert.throws(() => parseArgs(['--plan', '--live', '--out', 'x']), /read-only/);
+  const dry = execFileSync(process.execPath, ['scripts/benchmark.js', '--suite', 'challenge'], { cwd: path.join(__dirname, '..'), encoding: 'utf8' });
+  assert(dry.includes('39 synthetic engineering reference cases, 312 labels'));
+  assert(dry.includes('"measured": false'));
+  const planned = execFileSync(process.execPath, ['scripts/benchmark.js', '--suite', 'challenge', '--plan', '--concurrency', '2'], { cwd: path.join(__dirname, '..'), encoding: 'utf8', env: { ...process.env, LLM_PROVIDER: 'mock' } });
+  assert(planned.includes('"api_calls_performed": 0'));
+  assert(planned.includes('"base_model_calls": 39'));
+  assert.throws(() => assertOutputTarget(path.join(__dirname, '../docs/benchmark-results/latest.json'), require('./fixtures/benchmark-challenge-cases.json')), /different reference suite/);
+});
+
+test('missing provider usage is unknown billing, retains known partial cost and never becomes a free failed call', () => {
+  const outcomes = outcomesFor();
+  outcomes[14] = { case_id: fixture.cases[14].id, error: { code: 'TIMEOUT', status: 'timeout' }, duration_ms: 85, timing: { http_attempts: 1 }, usage: null, cost_usd: null, billing_complete: false, unknown_call_count: 1, known_usage: { input: 20, output: 10, thoughts: 0 }, known_cost_usd: 0.0078 };
+  const report = buildBenchmarkReport(fixture, outcomes);
+  assert.equal(report.metrics.criterion_match.total, 120);
+  assert.equal(report.metrics.criterion_match.matched, 112);
+  assert.equal(report.metrics.cost.total_usd, null);
+  assert.equal(report.metrics.cost.complete, false);
+  assert.equal(report.metrics.cost.observed_count, 14);
+  assert.equal(report.metrics.cost.missing_count, 1);
+  assert.equal(report.metrics.cost.unknown_call_count, 1);
+  assert.ok(Math.abs(report.metrics.cost.known_total_usd - 0.1478) < 1e-10);
+  assert.equal(report.cases[14].usage, null);
+  assert.equal(report.cases[14].error.code, 'TIMEOUT');
+  assert.equal(report.cases[14].error.status, 'timeout');
+  assert.equal(report.cases[14].cost_usd, null);
+  assert.equal(report.metrics.critical.unknown_positive, 1);
+});
+
+test('safe failure codes preserve typed provider status while discarding arbitrary diagnostic strings', () => {
+  assert.equal(failureCode({ status: 429 }), 'HTTP_429');
+  assert.equal(failureCode({ status: 'timeout' }), 'TIMEOUT');
+  assert.equal(failureCode({ status: 'network' }), 'NETWORK');
+  assert.equal(failureCode({ code: 'LLM_HTTP_503', status: 503 }), 'LLM_HTTP_503');
+  assert.equal(failureCode({ code: 'sk-must-not-be-exposed', message: 'credentials' }), 'EVALUATION_FAILED');
 });
 
 console.log(`\nBenchmark: ${passed} checks passed.`);
