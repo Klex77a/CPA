@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CQA — Оценка качества диалогов</title>
+  <link rel="stylesheet" href="cqa.css" />
+</head>
+<body style="margin:0">
+  <!--
+    Весь интерфейс монтируется в один контейнер #cqa-app и использует только префикс .cqa-*.
+    Для Dynamics 365: подключите cqa.css + cqa.js как веб-ресурсы, разместите <div id="cqa-app">
+    и задайте window.CQA_CONFIG = { apiBase: 'https://ваш-сервер' } до загрузки cqa.js.
+  -->
+  <div id="cqa-app"></div>
+  <script>window.CQA_CONFIG = window.CQA_CONFIG || { apiBase: '' };</script>
+  <script src="cqa.js"></script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+{
+  "name": "freedom-cqa",
+  "version": "1.0.0",
+  "description": "Conversation Quality Analytics — оценка качества диалогов операторов (хакатон Freedom Broker)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "demo": "node -e \"process.env.LLM_PROVIDER='mock';require('./server.js').server.listen(process.env.PORT||3000,()=>console.log('ДЕМО: http://localhost:'+(process.env.PORT||3000)))\"",
+    "test": "node test/scoring.test.js && node test/validation.test.js && node test/pipeline.test.js && node test/deepseek.test.js && node test/results.test.js"
+  },
+  "engines": { "node": ">=18" },
+  "license": "MIT"
+}

@@ -1,0 +1,8 @@
+.env
+node_modules/
+data/datasets/
+data/evaluations/
+data/appeals/
+data/checklists/
+*.tmp
+.DS_Store
