@@ -776,11 +776,14 @@
   flex-shrink: 0;
 }
 .conversation-score-ring {
+  --score-diameter: 112px;
+  --score-font-size: 26px;
   display: grid;
   place-items: center;
   flex-shrink: 0;
-  width: 92px;
-  height: 92px;
+  width: var(--score-diameter);
+  height: var(--score-diameter);
+  padding: 8px;
   border-radius: 50%;
   background: conic-gradient(var(--score-color) calc(var(--score) * 1%), #edf2ee 0);
   color: var(--score-color);
@@ -790,19 +793,21 @@
   flex-direction: column;
   justify-content: center;
   align-items: center;
-  width: 77px;
-  height: 77px;
+  width: 100%;
+  height: 100%;
   border-radius: 50%;
   background: var(--cqa-surface);
 }
 .conversation-score-ring strong {
-  font-size: 27px;
+  font-size: var(--score-font-size);
   font-weight: 800;
   letter-spacing: -1.3px;
   line-height: 1.1;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 .conversation-score-ring span {
+  white-space: nowrap;
   font-size: 11px;
   color: var(--cqa-muted);
   margin-top: 5px;
@@ -1571,15 +1576,8 @@
     gap: 13px;
   }
   .conversation-score-ring {
-    width: 82px;
-    height: 82px;
-  }
-  .conversation-score-ring > div {
-    width: 68px;
-    height: 68px;
-  }
-  .conversation-score-ring strong {
-    font-size: 24px;
+    --score-diameter: 100px;
+    --score-font-size: 24px;
   }
   .conversation-score-description h2 {
     font-size: 15px;
@@ -1703,14 +1701,6 @@
   .conversation-evaluation-summary {
     padding: 20px;
     gap: 18px;
-  }
-  .conversation-score-ring {
-    width: 92px;
-    height: 92px;
-  }
-  .conversation-score-ring > div {
-    width: 77px;
-    height: 77px;
   }
   .conversation-score-description h2 {
     font-size: 18px;
@@ -1882,17 +1872,6 @@
   .conversation-evaluation-summary {
     padding: 15px;
     gap: 13px;
-  }
-  .conversation-score-ring {
-    width: 78px;
-    height: 78px;
-  }
-  .conversation-score-ring > div {
-    width: 65px;
-    height: 65px;
-  }
-  .conversation-score-ring strong {
-    font-size: 23px;
   }
   .conversation-score-description h2 {
     font-size: 15px;
