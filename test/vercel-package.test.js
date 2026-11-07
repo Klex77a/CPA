@@ -14,6 +14,7 @@ assert.equal(config.framework, null);
 assert.equal(config.buildCommand, 'npm run build', 'the deployment must compile the React application');
 assert.equal(config.outputDirectory, 'dist');
 assert.ok(config.functions['api/index.js'].includeFiles.includes('dist/**'), 'the protected function must contain the compiled assets');
+assert.ok(config.functions['api/index.js'].includeFiles.length <= 256, 'Vercel limits a function includeFiles pattern to 256 characters');
 assert.ok(config.functions['api/index.js'].maxDuration <= 180);
 assert.ok(!config.routes.some((route) => route.handle === 'filesystem'), 'static files must not bypass the protected handler');
 for (const url of ['/', '/index.html', '/assets/index-example.mjs', '/assets/index-example.css', '/assets/freedom-mark.svg', '/demo-sample.json', '/api/config', '/api/batch/job/step', '/results/dev/results.json', '/.env']) {
