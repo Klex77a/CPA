@@ -16,10 +16,13 @@ assert.equal(config.outputDirectory, 'dist');
 assert.ok(config.functions['api/index.js'].includeFiles.includes('dist/**'), 'the protected function must contain the compiled assets');
 assert.ok(config.functions['api/index.js'].maxDuration <= 180);
 assert.ok(!config.routes.some((route) => route.handle === 'filesystem'), 'static files must not bypass the protected handler');
-for (const url of ['/', '/index.html', '/assets/index-example.js', '/assets/index-example.css', '/assets/freedom-mark.svg', '/demo-sample.json', '/api/config', '/api/batch/job/step', '/results/dev/results.json', '/.env']) {
+for (const url of ['/', '/index.html', '/assets/index-example.mjs', '/assets/index-example.css', '/assets/freedom-mark.svg', '/demo-sample.json', '/api/config', '/api/batch/job/step', '/results/dev/results.json', '/.env']) {
   const route = config.routes.find((item) => item.src && new RegExp('^(?:' + item.src + ')$').test(url));
   assert.equal(route?.dest, '/api/index', url + ' must pass through the same authenticated handler');
 }
+const clientModules = fs.readdirSync(path.join(root, 'dist', 'assets')).filter((name) => /\.m?js$/.test(name));
+assert.ok(clientModules.length > 0, 'run npm run build before the deployment checks');
+assert.ok(clientModules.every((name) => name.endsWith('.mjs')), 'browser modules must use .mjs to avoid the Node builder CommonJS transform');
 
 const handler = () => {};
 const exported = { exports: {} };

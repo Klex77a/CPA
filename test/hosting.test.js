@@ -34,7 +34,7 @@ async function test(name, callback) { await callback(); passed++; console.log('â
       for (const invalid of [null, 'Bearer x', 'Basic invalid!', auth + 'x']) assert.equal(credentialsMatch(invalid, 'midnight', cfg.ACCESS_PASSWORD), false);
       await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
       const base = `http://127.0.0.1:${server.address().port}`;
-      for (const uri of ['/', '/assets/index-example.js', '/api/config', '/api/datasets']) {
+      for (const uri of ['/', '/assets/index-example.mjs', '/api/config', '/api/datasets']) {
         const response = await fetch(base + uri, { headers: { host: headers.host } });
         assert.equal(response.status, 401);
         assert.match(response.headers.get('www-authenticate'), /Midnight Commit/);
@@ -52,11 +52,16 @@ async function test(name, callback) { await callback(); passed++; console.log('â
       assert.equal(cfg.PUBLIC_DIR, path.join(cfg.ROOT, 'dist'), 'run npm run build before the hosting checks');
       const entry = html.match(/<script\b[^>]*\btype="module"[^>]*\bsrc="([^"]+)"/);
       assert.ok(entry, 'the server must serve the compiled React entry');
-      assert.match(entry[1], /^\/assets\/.+\.js$/);
+      assert.match(entry[1], /^\/assets\/.+\.mjs$/);
       const bundle = await fetch(base + entry[1], { headers });
       assert.equal(bundle.status, 200);
       assert.match(bundle.headers.get('content-type'), /javascript/);
-      assert.ok((await bundle.text()).length > 100, 'the client bundle must contain compiled code');
+      const bytes = Buffer.from(await bundle.arrayBuffer());
+      assert.equal(Buffer.compare(bytes, fs.readFileSync(path.join(cfg.PUBLIC_DIR, entry[1]))), 0, 'the served module must match the built asset byte for byte');
+      const source = bytes.toString('utf8');
+      assert.ok(source.length > 100, 'the client bundle must contain compiled code');
+      assert.match(source, /\bexport\s*\{/, 'the client must retain native module exports');
+      assert.doesNotMatch(source, /^\s*["']use strict["'];\s*Object\.defineProperty\(exports/, 'the browser bundle must not be transformed into CommonJS');
       assert.equal((await fetch(base + entry[1], { headers: { host: headers.host } })).status, 401, 'compiled assets retain the same authentication boundary');
       assert.equal(requests, 0, 'static rendering uses no workspace connection');
       const response = await fetch(base + '/api/config', { headers: { ...headers, origin: 'https://' + new URL(base).host } });

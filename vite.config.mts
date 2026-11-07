@@ -14,6 +14,13 @@ export default defineConfig({
     outDir: fromRoot('./dist'),
     emptyOutDir: true,
     sourcemap: false,
+    // Vercel's Node builder preserves .mjs assets instead of compiling them to CommonJS.
+    rolldownOptions: {
+      output: {
+        entryFileNames: 'assets/[name]-[hash].mjs',
+        chunkFileNames: 'assets/[name]-[hash].mjs',
+      },
+    },
   },
   server: {
     host: '127.0.0.1',
