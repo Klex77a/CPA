@@ -4,11 +4,16 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const assert = require('assert');
+const crypto = require('crypto');
 
 const DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'cqa-results-'));
 Object.assign(process.env, { CQA_DATA_DIR: DATA, LLM_PROVIDER: 'mock' });
 
 const store = require('../src/store');
+const audioAccess = require('../src/audio-access');
+// The resolver makes a DNS-pinned HTTPS request in production. Keep this test offline.
+audioAccess.fetchAudioPage = (...args) => global.fetch(...args);
+audioAccess.assertAudioPageUrl = async (url) => ({ url: new URL(url), addresses: [] });
 const { server } = require('../server');
 const { audioSegments } = require('../src/audio-offsets');
 const audioOffsets = (r) => audioSegments(r).map((s) => (s ? s.start : null));
@@ -16,9 +21,13 @@ const audioOffsets = (r) => audioSegments(r).map((s) => (s ? s.start : null));
 const ev = (id, cid, provider, total, created, over = {}) => ({
   id, conversation_id: cid, group_id: 'G', channel: 'agent chat', language: 'RU', provider, model: provider + '-m', created_at: created,
   checklist: { id: 'default', name: 'Чек-лист', version: 2 }, checklist_snapshot: { criteria: [] },
+  transcript_hash: crypto.createHash('sha256').update('[]').digest('hex').slice(0, 16),
   original_result: { total, criteria: [] }, final_result: { total, criteria: [], gross_error: false, gross_error_criteria: [] },
   final_criteria: {}, appeals: [], coaching: [], operator_name: null, cost_usd: 0, ...over,
 });
+
+store.write('checklists', 'default', { ...store.read('checklists', 'default'), version: 2 });
+store.write('checklists', 'other', { id: 'other', name: 'Другой', version: 1, criteria: [], sections: [] });
 
 store.write('datasets', 'G', { group_id: 'G', records: ['a', 'b', 'c'].map((c) => ({ conversation_id: c, channel: 'agent chat', language: 'RU', transcript: [], audio_url: { a: 'https://rec.example/page?sig=1', b: 'https://rec.example/file.mp3' }[c] || null })) });
 // имена подобраны так, чтобы при чтении папки первой шла старая оценка

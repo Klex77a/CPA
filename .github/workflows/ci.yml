@@ -1,0 +1,37 @@
+name: CQA checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    env:
+      LLM_PROVIDER: mock
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run check
+      - run: npm test
+      - run: npm run benchmark
+      - name: Validate saved DEV submission
+        run: node scripts/validate-results.js results/dev/results.json --split=dev
+      - name: Validate saved control submission when available
+        if: ${{ hashFiles('results/prod/results.json') != '' }}
+        run: node scripts/validate-results.js results/prod/results.json --split=prod

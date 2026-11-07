@@ -3,7 +3,11 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>CQA — Оценка качества диалогов</title>
+  <meta name="theme-color" content="#02b140" />
+  <meta name="description" content="Freedom CQA — понятная оценка диалогов поддержки: чек-листы, доказательства, апелляции и аналитика качества команды." />
+  <title>Freedom CQA · Контроль качества</title>
+  <link rel="icon" href="assets/freedom-mark.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="assets/manrope.css" />
   <link rel="stylesheet" href="cqa.css" />
 </head>
 <body style="margin:0">
@@ -13,6 +17,7 @@
     и задайте window.CQA_CONFIG = { apiBase: 'https://ваш-сервер' } до загрузки cqa.js.
   -->
   <div id="cqa-app"></div>
+  <noscript><p style="font:16px/1.5 system-ui;padding:24px">Для работы Freedom CQA включите JavaScript в настройках браузера.</p></noscript>
   <script>window.CQA_CONFIG = window.CQA_CONFIG || { apiBase: '' };</script>
   <script src="cqa.js"></script>
 </body>

@@ -1,0 +1,68 @@
+{
+  "error": "",
+  "isSuccess": true,
+  "data": {
+    "dataset_group_id": "SAMPLE",
+    "total_records": 4,
+    "records": [
+      {
+        "conversation_id": "sample-ru-001",
+        "channel": "agent chat",
+        "language": "RU",
+        "transcript": [
+          { "timestamp": "00:00", "speaker": "bot", "text": "Здравствуйте! Я виртуальный помощник Freedom Broker. Опишите ваш вопрос." },
+          { "timestamp": "00:05", "speaker": "client", "text": "Хочу узнать баланс моего брокерского счёта и почему вывод денег до сих пор не пришёл" },
+          { "timestamp": "00:06", "speaker": "system", "text": "Чат переведён на оператора" },
+          { "timestamp": "00:40", "speaker": "operator", "text": "Здравствуйте! Меня зовут Айгерим, я оператор Freedom Broker. Понимаю, что задержка вывода неприятна. Для проверки данных назовите, пожалуйста, ваше кодовое слово." },
+          { "timestamp": "01:02", "speaker": "client", "text": "Кодовое слово — Байтерек" },
+          { "timestamp": "01:03", "speaker": "system", "text": "Идентификация клиента пройдена" },
+          { "timestamp": "01:10", "speaker": "operator", "text": "Спасибо! Проверю информацию, это займёт около двух минут, пожалуйста, ожидайте." },
+          { "timestamp": "03:05", "speaker": "operator", "text": "Ваш баланс 1 250 000 тенге. Заявка на вывод от 3 ноября обрабатывается банком-получателем, срок зачисления до 3 рабочих дней. Если завтра средства не поступят, напишите нам — мы направим запрос в банк." },
+          { "timestamp": "03:30", "speaker": "client", "text": "Понятно, спасибо" },
+          { "timestamp": "03:40", "speaker": "operator", "text": "Рада была помочь! Могу ли я помочь чем-то ещё? Хорошего дня!" },
+          { "timestamp": "04:10", "speaker": "system", "text": "Чат закрыт" }
+        ],
+        "audio_url": null
+      },
+      {
+        "conversation_id": "sample-kz-002",
+        "channel": "agent chat",
+        "language": "KZ",
+        "transcript": [
+          { "timestamp": "00:00", "speaker": "client", "text": "Сәлеметсіз бе, тарифтер туралы білгім келеді" },
+          { "timestamp": "00:50", "speaker": "operator", "text": "Добрый день. Тарифы есть на сайте." },
+          { "timestamp": "01:20", "speaker": "client", "text": "Қай тариф жаңа инвесторға қолайлы?" },
+          { "timestamp": "02:10", "speaker": "operator", "text": "Смотрите на сайте раздел тарифы." },
+          { "timestamp": "02:40", "speaker": "system", "text": "Чат закрыт оператором" }
+        ],
+        "audio_url": null
+      },
+      {
+        "conversation_id": "sample-en-003",
+        "channel": "agent chat",
+        "language": "EN",
+        "transcript": [
+          { "timestamp": "00:00", "speaker": "client", "text": "Hi, my withdrawal is not working, this is terrible" },
+          { "timestamp": "00:30", "speaker": "operator", "text": "Hello, this is Daniyar from Freedom Broker. I'm sorry for the trouble. Could you tell me the date of the withdrawal request?" },
+          { "timestamp": "01:00", "speaker": "client", "text": "Yesterday. Can you just tell me my account balance?" },
+          { "timestamp": "01:20", "speaker": "operator", "text": "Your balance is 4,300 USD. By the way, I can manage your money personally with better returns — just transfer to my card and I'll invest it for you." },
+          { "timestamp": "01:50", "speaker": "client", "text": "Hmm, ok" }
+        ],
+        "audio_url": null
+      },
+      {
+        "conversation_id": "sample-call-004",
+        "channel": "voice call",
+        "language": "RU",
+        "transcript": [
+          { "timestamp": "2026-11-05T10:00:00+05:00", "speaker": "operator", "text": "Добрый день, компания Фридом Брокер, меня зовут Ерлан, чем могу помочь?" },
+          { "timestamp": "2026-11-05T10:00:06+05:00", "speaker": "client", "text": "Здравствуйте, подскажите, как открыть брокерский счёт?" },
+          { "timestamp": "2026-11-05T10:00:15+05:00", "speaker": "operator", "text": "Счёт можно открыть онлайн в приложении Tradernet: скачайте приложение, нажмите «Открыть счёт», пройдите верификацию по удостоверению личности. Обычно это занимает 10–15 минут." },
+          { "timestamp": "2026-11-05T10:00:40+05:00", "speaker": "client", "text": "А нужна ли минимальная сумма?" },
+          { "timestamp": "2026-11-05T10:00:48+05:00", "speaker": "operator", "text": "Минимальной суммы для открытия нет. Ещё вопросы есть? Всего доброго!" }
+        ],
+        "audio_url": "https://example.com/sample-call-004.mp3"
+      }
+    ]
+  }
+}

@@ -22,6 +22,7 @@ const round = (x, d = 2) => {
 
 const scaleValues = (c) => (c.scale || []).map((s) => Number(s.value));
 const scaleMax = (c) => Math.max(...scaleValues(c));
+const isNumeric = (value) => (typeof value === 'number' || (typeof value === 'string' && value.trim() !== '')) && Number.isFinite(Number(value));
 
 class AnswerError extends Error {}
 
@@ -51,8 +52,10 @@ function validateAnswer(c, raw) {
   if (answer === 'NA' && !c.na_allowed) throw new AnswerError(`«${c.title}»: N/A для этого критерия не разрешён`);
   if (!allowed.includes(answer)) throw new AnswerError(`«${c.title}»: недопустимый ответ «${raw && raw.answer}». Допустимо: ${allowed.join(', ')}`);
   if (answer === 'SCORE') {
-    const v = Number(raw.value ?? raw.score);
+    const value = raw.value ?? raw.score;
+    const v = Number(value);
     if (raw.value == null && raw.score == null) throw new AnswerError(`«${c.title}»: не указана ступень шкалы`);
+    if (!isNumeric(value)) throw new AnswerError(`«${c.title}»: ступень шкалы должна быть числом`);
     if (!scaleValues(c).includes(v)) throw new AnswerError(`«${c.title}»: ${raw.value ?? raw.score} не является ступенью шкалы (${scaleValues(c).join(', ')})`);
     return { answer, value: v };
   }
@@ -131,23 +134,37 @@ function computeScore(checklist, answers) {
 /** Проверка конфигурации чек-листа (вызывается при сохранении). Возвращает список ошибок. */
 function validateChecklist(cl) {
   const errors = [];
-  if (!cl || !String(cl.name || '').trim()) errors.push('Нет названия чек-листа');
+  if (!cl || typeof cl !== 'object' || Array.isArray(cl)) return ['Чек-лист должен быть объектом'];
+  if (typeof cl.name !== 'string' || !cl.name.trim()) errors.push('Нет названия чек-листа');
   if (!Array.isArray(cl && cl.criteria) || !cl.criteria.length) { errors.push('Нет критериев'); return errors; }
+  if (cl.criteria.length > 200) errors.push('В чек-листе допускается не более 200 критериев');
+  if (cl.rounding != null && (!isNumeric(cl.rounding) || !Number.isInteger(Number(cl.rounding)) || Number(cl.rounding) < 0 || Number(cl.rounding) > 6)) errors.push('Округление должно быть целым числом от 0 до 6');
   const ids = new Set();
-  const sectionIds = new Set((cl.sections || []).map((s) => s.id));
+  const validId = (id) => typeof id === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(id) && !['__proto__', 'constructor', 'prototype'].includes(id);
+  const sectionIds = new Set();
+  if (cl.sections != null && !Array.isArray(cl.sections)) errors.push('Секции должны быть массивом');
+  for (const s of Array.isArray(cl.sections) ? cl.sections : []) {
+    if (!s || typeof s !== 'object' || Array.isArray(s)) { errors.push('Секция должна быть объектом'); continue; }
+    if (!validId(s.id)) errors.push('У секции некорректный id');
+    if (sectionIds.has(s.id)) errors.push(`Повторяется секция ${s.id}`);
+    sectionIds.add(s.id);
+    if (typeof s.name !== 'string' || !s.name.trim()) errors.push(`Секция ${s.id}: нет названия`);
+  }
   for (const c of cl.criteria) {
+    if (!c || typeof c !== 'object' || Array.isArray(c)) { errors.push('Критерий должен быть объектом'); continue; }
     const name = c.title || c.id || '?';
-    if (!c.id || !/^[A-Za-z0-9_-]{1,40}$/.test(String(c.id))) errors.push(`${name}: некорректный id`);
+    if (!validId(c.id)) errors.push(`${name}: некорректный id`);
     if (ids.has(c.id)) errors.push(`Повторяется id ${c.id}`);
     ids.add(c.id);
-    if (!String(c.title || '').trim()) errors.push(`${c.id}: нет названия`);
+    if (typeof c.title !== 'string' || !c.title.trim()) errors.push(`${c.id}: нет названия`);
     if (!['binary', 'scale', 'flag'].includes(c.type)) errors.push(`${c.id}: неизвестный тип ${c.type}`);
     const w = Number(c.weight);
-    if (c.type !== 'flag' && (!Number.isFinite(w) || w < 0)) errors.push(`${c.id}: вес должен быть неотрицательным числом`);
+    if (c.type !== 'flag' && (!isNumeric(c.weight) || w < 0)) errors.push(`${c.id}: вес должен быть неотрицательным числом`);
     if (c.section && !sectionIds.has(c.section)) errors.push(`${c.id}: секция «${c.section}» не существует`);
     if (c.na_allowed && c.type !== 'flag' && !String(c.na_condition || '').trim()) errors.push(`${c.id}: N/A разрешён, но не задано условие N/A`);
     if (c.type === 'scale') {
-      const vals = (c.scale || []).map((s) => Number(s.value));
+      if (!Array.isArray(c.scale)) { errors.push(`${c.id}: шкала должна быть массивом`); continue; }
+      const vals = c.scale.map((s) => s && isNumeric(s.value) ? Number(s.value) : NaN);
       if (vals.length < 2) errors.push(`${c.id}: у шкалы должно быть минимум 2 ступени`);
       if (vals.some((v) => !Number.isFinite(v))) errors.push(`${c.id}: ступени шкалы должны быть числами`);
       if (vals.some((v) => v < 0)) errors.push(`${c.id}: ступени шкалы не могут быть отрицательными`);

@@ -2,7 +2,7 @@
 /**
  * CQA — Conversation Quality Analytics (прототип для хакатона Freedom Broker).
  * Запуск: node server.js  → http://localhost:3000
- * Зависимостей нет: нужен только Node.js 18+.
+ * Локальный JSON-режим: Node.js 18+. Облачный режим использует pg/Postgres.
  */
 const http = require('http');
 const fs = require('fs');
@@ -12,11 +12,18 @@ const store = require('./src/store');
 const { evaluate, recompute, cacheKey } = require('./src/evaluator');
 const { audioSegments } = require('./src/audio-offsets');
 const { validateChecklist, validateAnswer, AnswerError } = require('./src/scoring');
+const { buildSubmission } = require('./src/result-export');
+const { fetchAudioPage, assertAudioPageUrl } = require('./src/audio-access');
+const { saveEvaluationFailure } = require('./src/evaluation-failure');
+const { evaluationFreshness } = require('./src/evaluation-freshness');
+const { getReadiness, inspectBenchmark, benchmarkReportPath } = require('./src/readiness');
+const { authorize, isSameOrigin } = require('./src/access');
+const { HttpBuffer } = require('./src/http-buffer');
 
 // ---------- начальный чек-лист ----------
 // Исходный чек-лист из PDF лежит в src/default-checklist.json и копируется в data/ при первом запуске.
 // Чтобы сбросить к исходному — удалите data/checklists/default.json и перезапустите сервер.
-if (!store.read('checklists', 'default')) {
+if (!store.cloudMode && !store.read('checklists', 'default')) {
   const seed = JSON.parse(fs.readFileSync(path.join(__dirname, 'src', 'default-checklist.json'), 'utf8'));
   seed.updated_at = new Date().toISOString();
   store.write('checklists', 'default', seed);
@@ -25,40 +32,60 @@ if (!store.read('checklists', 'default')) {
 // ---------- утилиты HTTP ----------
 function send(res, status, body, headers = {}) {
   const isStr = typeof body === 'string' || Buffer.isBuffer(body);
-  res.writeHead(status, { 'Content-Type': isStr ? 'text/plain; charset=utf-8' : 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*', ...headers });
+  res.writeHead(status, { 'Content-Type': isStr ? 'text/plain; charset=utf-8' : 'application/json; charset=utf-8', ...headers });
   res.end(isStr ? body : JSON.stringify(body));
 }
 const fail = (res, status, msg) => send(res, status, { error: msg });
 
 function readBody(req, limit = 20 * 1024 * 1024) {
+  const parse = (value) => {
+    const raw = Buffer.isBuffer(value) ? value.toString('utf8') : value;
+    if (raw === undefined || raw === '') return {};
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw Object.assign(new Error('Тело запроса должно быть JSON-объектом'), { status: 400 });
+    if (Buffer.byteLength(JSON.stringify(parsed)) > limit) throw Object.assign(new Error('Слишком большой запрос'), { status: 413 });
+    return parsed;
+  };
+  // Vercel exposes a lazy parsed body; its stream may already be consumed.
+  if ('body' in req) {
+    try { return Promise.resolve(parse(req.body)); }
+    catch (error) { return Promise.reject(error.status ? error : Object.assign(new Error('Некорректный JSON'), { status: 400 })); }
+  }
   return new Promise((resolve, reject) => {
     let size = 0;
+    let tooLarge = false;
     const chunks = [];
     req.on('data', (c) => {
+      if (tooLarge) return;
       size += c.length;
       if (size > limit) {
+        tooLarge = true;
+        chunks.length = 0;
         reject(Object.assign(new Error('Слишком большой запрос'), { status: 413 }));
-        req.destroy();
       } else chunks.push(c);
     });
     req.on('end', () => {
+      if (tooLarge) return;
       const raw = Buffer.concat(chunks).toString('utf8');
       if (!raw) return resolve({});
       try {
-        resolve(JSON.parse(raw));
+        resolve(parse(raw));
       } catch (e) {
-        reject(Object.assign(new Error('Некорректный JSON'), { status: 400 }));
+        reject(e.status ? e : Object.assign(new Error('Некорректный JSON'), { status: 400 }));
       }
     });
     req.on('error', reject);
   });
 }
 
-const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon' };
+const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.woff': 'font/woff' };
 function serveStatic(req, res, pathname) {
-  const rel = pathname === '/' ? '/index.html' : decodeURIComponent(pathname);
-  const file = path.normalize(path.join(cfg.PUBLIC_DIR, rel));
-  if (!file.startsWith(cfg.PUBLIC_DIR)) return fail(res, 403, 'forbidden');
+  let rel;
+  try { rel = pathname === '/' ? '/index.html' : decodeURIComponent(pathname); }
+  catch (_) { return fail(res, 400, 'Некорректный URL'); }
+  const file = path.resolve(cfg.PUBLIC_DIR, '.' + rel);
+  const relative = path.relative(cfg.PUBLIC_DIR, file);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) return fail(res, 403, 'forbidden');
   fs.readFile(file, (err, buf) => {
     if (err) return fail(res, 404, 'not found');
     res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
@@ -73,16 +100,37 @@ function normalizeRecords(payload) {
   if (payload && payload.data && Array.isArray(payload.data.records)) records = payload.data.records;
   else if (payload && Array.isArray(payload.records)) records = payload.records;
   if (!Array.isArray(records)) throw Object.assign(new Error('Не найден массив records'), { status: 400 });
+  const bad = (message) => { throw Object.assign(new Error(message), { status: 400 }); };
+  const ids = new Set();
   return records.map((r, i) => {
+    if (!r || typeof r !== 'object' || Array.isArray(r)) bad(`Диалог ${i + 1}: ожидается объект`);
+    const id = r.conversation_id;
+    if (typeof id !== 'string' || !id.trim() || id.length > 200) bad(`Диалог ${i + 1}: нужен исходный строковый conversation_id (1–200 символов)`);
+    if (ids.has(id)) bad(`Повторяется conversation_id: ${id}`);
+    ids.add(id);
     let tr = r.transcript;
     if (typeof tr === 'string') {
       try { tr = JSON.parse(tr); } catch (_) { tr = [{ timestamp: '', speaker: 'system', text: tr }]; }
     }
+    if (!Array.isArray(tr)) bad(`Диалог ${id}: transcript должен быть массивом реплик`);
+    const transcript = tr.map((m, j) => {
+      if (!m || typeof m !== 'object' || Array.isArray(m) || typeof m.text !== 'string') bad(`Диалог ${id}, реплика ${j + 1}: необходим текст text`);
+      const speaker = String(m.speaker || '').toLowerCase();
+      if (!['operator', 'client', 'bot', 'system'].includes(speaker)) bad(`Диалог ${id}, реплика ${j + 1}: неизвестный speaker`);
+      if (m.timestamp != null && typeof m.timestamp !== 'string' && typeof m.timestamp !== 'number') bad(`Диалог ${id}, реплика ${j + 1}: некорректный timestamp`);
+      return { timestamp: m.timestamp ?? '', speaker, text: m.text };
+    });
+    if (r.audio_url != null && typeof r.audio_url !== 'string') bad(`Диалог ${id}: audio_url должен быть строкой`);
+    if (r.audio_url) {
+      let audio;
+      try { audio = new URL(r.audio_url); } catch (_) { bad(`Диалог ${id}: некорректный audio_url`); }
+      if (audio.protocol !== 'https:' || audio.username || audio.password) bad(`Диалог ${id}: audio_url должен быть HTTPS без логина и пароля`);
+    }
     return {
-      conversation_id: String(r.conversation_id || `conv-${i + 1}`),
-      channel: r.channel || 'agent chat',
-      language: r.language || '',
-      transcript: (tr || []).map((m) => ({ timestamp: m.timestamp ?? '', speaker: String(m.speaker || '').toLowerCase(), text: m.text ?? '' })),
+      conversation_id: id,
+      channel: String(r.channel || 'agent chat'),
+      language: String(r.language || '').toUpperCase(),
+      transcript,
       audio_url: r.audio_url || null,
     };
   });
@@ -96,7 +144,7 @@ async function fetchDataset(groupId) {
   if (!cfg.DATA_API_URL) throw Object.assign(new Error('В .env не задан DATA_API_URL (ссылка GET организаторов)'), { status: 400 });
   const url = new URL(cfg.DATA_API_URL);
   url.searchParams.set('group_id', groupId);
-  const r = await fetch(url, { method: 'GET' });
+  const r = await fetch(url, { method: 'GET', signal: AbortSignal.timeout(30000) });
   const text = await r.text();
   if (!r.ok) throw Object.assign(new Error(`API организаторов вернул ${r.status}: ${text.slice(0, 300)}`), { status: 502 });
   const j = JSON.parse(text);
@@ -115,7 +163,7 @@ async function resolveAudio(pageUrl) {
   if (hit && hit.until > Date.now()) return hit.url;
   const bad = (message) => Object.assign(new Error(message), { status: 502 });
   if (!/^https:\/\//i.test(pageUrl)) throw bad('Ссылка на запись должна начинаться с https://');
-  const r = await fetch(pageUrl, { signal: AbortSignal.timeout(20000) });
+  const r = await fetchAudioPage(pageUrl);
   if (!r.ok) throw bad(`Сервис записей ответил ошибкой ${r.status}`);
   let url = pageUrl;
   if (/text\/html/i.test(r.headers.get('content-type') || '')) {
@@ -123,6 +171,7 @@ async function resolveAudio(pageUrl) {
     if (!m) throw bad('На странице записи не найден аудиофайл');
     url = m[1].replace(/&amp;/g, '&');
     if (!/^https:\/\//i.test(url)) throw bad('Ссылка на аудиофайл должна начинаться с https://');
+    await assertAudioPageUrl(url);
   } else if (r.body) await r.body.cancel();
   const expires = Date.parse(new URL(url).searchParams.get('se'));
   audioCache.set(pageUrl, { url, until: Math.min(Date.now() + AUDIO_CACHE_MS, Number.isNaN(expires) ? Infinity : expires - 60000) });
@@ -159,9 +208,9 @@ function cleanChecklist(cl) {
 // ---------- пакетная оценка ----------
 const jobs = new Map();
 /** Готовый результат для того же содержимого диалога, чек-листа и настроек (последний по времени). */
-function findCached(record, checklist) {
+function findCached(record, checklist, groupId) {
   const key = cacheKey(record, checklist);
-  return store.list('evaluations').filter((e) => e.cache_key === key).sort((a, b) => b.created_at.localeCompare(a.created_at))[0] || null;
+  return store.list('evaluations').filter((e) => e.group_id === groupId && e.cache_key === key).sort((a, b) => b.created_at.localeCompare(a.created_at))[0] || null;
 }
 
 async function runBatch(job, records, checklist, force) {
@@ -170,7 +219,7 @@ async function runBatch(job, records, checklist, force) {
     while (idx < records.length && !job.cancelled) {
       const rec = records[idx++];
       const item = job.items[rec.conversation_id];
-      if (!force && findCached(rec, checklist)) {
+      if (!force && findCached(rec, checklist, job.group_id)) {
         item.status = 'skipped';
         job.skipped++;
         job.done++;
@@ -185,6 +234,7 @@ async function runBatch(job, records, checklist, force) {
         item.status = ev.status === 'needs_review' ? 'needs_review' : 'done';
         item.ms = ev.duration_ms;
       } catch (e) {
+        saveEvaluationFailure(rec, checklist, job.group_id, e);
         item.status = 'error';
         item.error = e.message;
         job.errors.push({ conversation_id: rec.conversation_id, error: e.message });
@@ -206,6 +256,15 @@ function jobView(job) {
   return { ...rest, counts };
 }
 
+function flagStatus(e) {
+  const flags = (e.checklist_snapshot.criteria || []).filter((criterion) => criterion.type === 'flag');
+  const unknown = flags.some((criterion) => {
+    const answer = e.final_criteria[criterion.id];
+    return !answer || !['YES', 'NO'].includes(answer.answer) || answer.review_required || (answer.issues || []).length > 0;
+  });
+  return { gross_error: e.final_result.gross_error, gross_error_unknown: unknown };
+}
+
 function evalSummary(e) {
   return {
     id: e.id,
@@ -219,11 +278,21 @@ function evalSummary(e) {
     model: e.model,
     original_total: e.original_result.total,
     final_total: e.final_result.total,
-    gross_error: e.final_result.gross_error,
+    ...flagStatus(e),
     status: e.status || 'ok',
     operator_name: e.operator_name || null,
     appeals_open: e.appeals.filter((a) => a.status === 'open').length,
     appeals_total: e.appeals.length,
+    ...evaluationFreshness(e, getRecord(e.group_id, e.conversation_id), store.read('checklists', e.checklist.id)),
+  };
+}
+
+function evaluationView(evaluation) {
+  const snapshot = evaluation.record_snapshot;
+  return {
+    ...evaluation,
+    ...evaluationFreshness(evaluation, getRecord(evaluation.group_id, evaluation.conversation_id), store.read('checklists', evaluation.checklist.id)),
+    record_snapshot: snapshot ? { ...snapshot, audio_segments: audioSegments(snapshot) } : null,
   };
 }
 
@@ -240,7 +309,8 @@ function latestEvals(groupId, checklistId) {
   for (const e of store.list('evaluations').sort(compareEvals)) {
     if (groupId && e.group_id !== groupId) continue;
     if (checklistId && e.checklist.id !== checklistId) continue;
-    const key = `${e.group_id}|${e.conversation_id}|${e.checklist.id}`;
+    if (evaluationFreshness(e, getRecord(e.group_id, e.conversation_id), store.read('checklists', e.checklist.id)).stale) continue;
+    const key = JSON.stringify([e.group_id, e.conversation_id, e.checklist.id]);
     if (!by.has(key)) by.set(key, e);
   }
   return [...by.values()];
@@ -256,14 +326,18 @@ function analytics(groupId, checklistId) {
 
   // доля выполнения критерия = набранные / максимальные баллы среди применимых
   const critStat = (list, cid) => {
-    let got = 0, max = 0, applicable = 0, na = 0;
+    let got = 0, max = 0, applicable = 0, na = 0, invalid = 0;
     for (const e of list) {
       const r = e.final_result.criteria.find((x) => x.id === cid);
       if (!r) continue;
-      if (!r.scored) { na++; continue; }
+      if (!r.scored) {
+        if (r.answer === 'NA') na++;
+        if (r.answer === 'INVALID') invalid++;
+        continue;
+      }
       applicable++; got += r.raw; max += r.weight;
     }
-    return { applicable, na, rate: max > 0 ? Math.round((got / max) * 1000) / 10 : null };
+    return { applicable, na, invalid, rate: max > 0 ? Math.round((got / max) * 1000) / 10 : null };
   };
   const criteria = crits.map((c) => ({
     id: c.id, code: c.code, title: c.title,
@@ -285,23 +359,28 @@ function analytics(groupId, checklistId) {
     return {
       name, unnamed: !list[0].operator_name, dialogs: list.length, avg: avg(sc), min: sc.length ? Math.min(...sc) : null,
       gross: list.filter((e) => e.final_result.gross_error).length,
+      gross_unknown: list.filter((e) => flagStatus(e).gross_error_unknown).length,
       languages: [...new Set(list.map((e) => e.language))],
       weakest: weak && weak.s.rate < 100 ? { title: weak.c.title, rate: weak.s.rate } : null,
       criteria: crits.map((c) => ({ id: c.id, code: c.code, title: c.title, ...critStat(list, c.id) })),
       coaching: list.flatMap((e) => (e.coaching || []).filter((x) => x.type === 'required').map((x) => ({ text: x.text, criterion_id: x.criterion_id, conversation_id: e.conversation_id }))).slice(0, 6),
-      conversations: list.map((e) => ({ id: e.conversation_id, total: e.final_result.total, eval_id: e.id, language: e.language, channel: e.channel, gross: !!e.final_result.gross_error })),
+      conversations: list.map((e) => ({ id: e.conversation_id, total: e.final_result.total, eval_id: e.id, language: e.language, channel: e.channel, gross: !!e.final_result.gross_error, gross_unknown: flagStatus(e).gross_error_unknown })),
     };
   }).sort((a, b) => (a.unnamed - b.unnamed) || (b.avg ?? -1) - (a.avg ?? -1) || a.gross - b.gross);
 
   const groupAvg = (key) => Object.fromEntries([...new Set(evs.map((e) => e[key] || '—'))].map((k) => [k, { avg: avg(scored.filter((e) => (e[key] || '—') === k).map((e) => e.final_result.total)), n: evs.filter((e) => (e[key] || '—') === k).length }]));
 
+  const orderedTotals = scored.map((e) => e.final_result.total).sort((a, b) => a - b);
+  const middle = Math.floor(orderedTotals.length / 2);
+  const median = orderedTotals.length ? (orderedTotals.length % 2 ? orderedTotals[middle] : (orderedTotals[middle - 1] + orderedTotals[middle]) / 2) : null;
   return {
     group_id: groupId, checklist: cl ? { id: cl.id, name: cl.name, version: cl.version } : null,
     evaluated: evs.length, avg: avg(scored.map((e) => e.final_result.total)),
     models: [...new Set(evs.map((e) => `${e.provider} / ${e.model}`))],
     demo_count: evs.filter((e) => e.provider === 'mock').length,
-    median: scored.length ? scored.map((e) => e.final_result.total).sort((a, b) => a - b)[Math.floor((scored.length - 1) / 2)] : null,
+    median: median == null ? null : Math.round(median * 100) / 100,
     gross_count: evs.filter((e) => e.final_result.gross_error).length,
+    gross_unknown_count: evs.filter((e) => flagStatus(e).gross_error_unknown).length,
     appeals_open: evs.reduce((s, e) => s + e.appeals.filter((a) => a.status === 'open').length, 0),
     appeals_total: evs.reduce((s, e) => s + e.appeals.length, 0),
     changed_by_appeal: evs.filter((e) => e.final_result.total !== e.original_result.total).length,
@@ -316,9 +395,28 @@ function analytics(groupId, checklistId) {
 
 // ---------- роутер ----------
 async function handleApi(req, res, url) {
-  const p = url.pathname.replace(/^\/api/, '').split('/').filter(Boolean).map(decodeURIComponent);
+  let p;
+  try { p = url.pathname.replace(/^\/api/, '').split('/').filter(Boolean).map(decodeURIComponent); }
+  catch (_) { return fail(res, 400, 'Некорректный URL'); }
   const m = req.method;
   const q = Object.fromEntries(url.searchParams);
+
+  if (p[0] === 'workspace' && p[1] === 'import' && p.length === 2 && m === 'POST') {
+    if (!store.cloudMode) return fail(res, 404, 'Перенос рабочего пространства доступен в облачной версии');
+    const { importEntries } = require('./src/workspace-transfer');
+    return send(res, 200, importEntries(await readBody(req, 1024 * 1024)));
+  }
+
+  if (p[0] === 'readiness' && p.length === 1 && m === 'GET') return send(res, 200, getReadiness(), { 'Cache-Control': 'no-store' });
+  if (p[0] === 'benchmark' && p[1] === 'report' && p.length === 2 && m === 'GET') {
+    const status = inspectBenchmark();
+    if (status.state === 'not_run') return fail(res, 404, status.message);
+    if (status.state === 'blocked') return fail(res, 422, status.message);
+    return send(res, 200, fs.readFileSync(benchmarkReportPath()), { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': 'attachment; filename="benchmark-report.json"', 'Cache-Control': 'no-store' });
+  }
+  if (p[0] === 'demo-guide' && p.length === 1 && m === 'GET') {
+    return send(res, 200, fs.readFileSync(path.join(cfg.ROOT, 'docs', 'DEMO_SCRIPT.md')), { 'Content-Type': 'text/markdown; charset=utf-8', 'Content-Disposition': 'attachment; filename="Midnight-Commit-demo.md"' });
+  }
 
   // /api/config
   // /api/audio/:group/:conversation — перенаправляет встроенный плеер на актуальный аудиофайл
@@ -342,12 +440,14 @@ async function handleApi(req, res, url) {
     if (p[1] === 'fetch' && m === 'POST') {
       const b = await readBody(req);
       const gid = String(b.group_id || 'DEV').trim();
+      if (!gid) return fail(res, 400, 'Укажите непустой group_id');
       const ds = await fetchDataset(gid);
       return send(res, 200, { group_id: gid, total_records: ds.total_records });
     }
     if (p[1] === 'upload' && m === 'POST') {
       const b = await readBody(req);
       const gid = String(b.group_id || 'UPLOAD').trim();
+      if (!gid) return fail(res, 400, 'Укажите непустой group_id');
       const records = normalizeRecords(b.payload);
       // дополняем существующий набор, если загружаем по одному диалогу
       const ds = store.read('datasets', gid);
@@ -401,9 +501,9 @@ async function handleApi(req, res, url) {
       return cl ? send(res, 200, cl) : fail(res, 404, 'Чек-лист не найден');
     }
     if (p.length === 2 && m === 'PUT') {
+      const b = await readBody(req);
       const prev = store.read('checklists', p[1]);
       if (!prev) return fail(res, 404, 'Чек-лист не найден');
-      const b = await readBody(req);
       const errs = validateChecklist(b);
       if (errs.length) return fail(res, 400, errs.join('; '));
       const cl = cleanChecklist(b);
@@ -429,16 +529,26 @@ async function handleApi(req, res, url) {
     const cl = store.read('checklists', b.checklist_id || 'default');
     if (!cl) return fail(res, 404, 'Чек-лист не найден');
     if (!b.force) {
-      const cached = findCached(rec, cl);
+      const cached = findCached(rec, cl, b.group_id);
       if (cached) return send(res, 200, { ...cached, cached: true });
     }
-    const ev = await evaluate(rec, cl, b.group_id, { force: !!b.force });
+    let ev;
+    try { ev = await evaluate(rec, cl, b.group_id, { force: !!b.force }); }
+    catch (error) { saveEvaluationFailure(rec, cl, b.group_id, error); throw error; }
     store.write('evaluations', ev.id, ev);
     return send(res, 200, ev);
   }
 
   // /api/batch — пакетная оценка набора
   if (p[0] === 'batch') {
+    if (store.cloudMode) {
+      const batch = require('./src/cloud-batch');
+      if (p.length === 1 && m === 'POST') return send(res, 202, batch.createBatch(await readBody(req)));
+      if (p.length === 2 && m === 'GET') return send(res, 200, batch.getBatch(p[1]));
+      if (p.length === 3 && p[2] === 'step' && m === 'POST') return send(res, 200, await batch.stepBatch(p[1]));
+      if (p.length === 3 && p[2] === 'cancel' && m === 'POST') return send(res, 200, batch.cancelBatch(p[1]));
+      return fail(res, 404, 'Неизвестный маршрут пакетной задачи');
+    }
     if (p.length === 1 && m === 'POST') {
       const b = await readBody(req);
       const ds = store.read('datasets', b.group_id);
@@ -446,7 +556,12 @@ async function handleApi(req, res, url) {
       const cl = store.read('checklists', b.checklist_id || 'default');
       if (!cl) return fail(res, 404, 'Чек-лист не найден');
       let records = ds.records;
-      if (Array.isArray(b.conversation_ids) && b.conversation_ids.length) records = records.filter((r) => b.conversation_ids.includes(r.conversation_id));
+      if (b.conversation_ids !== undefined) {
+        if (!Array.isArray(b.conversation_ids) || !b.conversation_ids.length || b.conversation_ids.some((id) => typeof id !== 'string' || !id.trim())) return fail(res, 400, 'conversation_ids должен содержать непустой список ID выбранных диалогов');
+        const selected = new Set(b.conversation_ids);
+        if (selected.size !== b.conversation_ids.length || b.conversation_ids.some((id) => !ds.records.some((record) => record.conversation_id === id))) return fail(res, 400, 'В conversation_ids есть повторяющиеся или неизвестные ID');
+        records = records.filter((record) => selected.has(record.conversation_id));
+      }
       const job = { id: store.newId('job'), group_id: b.group_id, checklist_id: cl.id, checklist_version: cl.version, total: records.length, done: 0, skipped: 0, errors: [], cost_usd: 0, status: 'running', started_at: new Date().toISOString(), t0: Date.now(), items: Object.fromEntries(records.map((r) => [r.conversation_id, { status: 'queued' }])) };
       jobs.set(job.id, job);
       runBatch(job, records, cl, !!b.force).catch((e) => {
@@ -461,7 +576,8 @@ async function handleApi(req, res, url) {
     }
     if (p.length === 3 && p[2] === 'cancel' && m === 'POST') {
       const job = jobs.get(p[1]);
-      if (job) job.cancelled = true;
+      if (!job) return fail(res, 404, 'Задача не найдена');
+      job.cancelled = true;
       return send(res, 200, { ok: true });
     }
   }
@@ -481,13 +597,18 @@ async function handleApi(req, res, url) {
       for (const e of evs) store.remove('evaluations', e.id);
       return send(res, 200, { removed: evs.length, appeals: evs.reduce((s, e) => s + e.appeals.length, 0) });
     }
-    const ev = p[1] ? store.read('evaluations', p[1]) : null;
-    if (p.length === 2 && m === 'GET') return ev ? send(res, 200, ev) : fail(res, 404, 'Оценка не найдена');
+    let ev = p[1] ? store.read('evaluations', p[1]) : null;
+    if (p.length === 2 && m === 'GET') {
+      if (!ev) return fail(res, 404, 'Оценка не найдена');
+      return send(res, 200, evaluationView(ev));
+    }
     if (!ev) return fail(res, 404, 'Оценка не найдена');
 
     // подать апелляцию
     if (p[2] === 'appeals' && p.length === 3 && m === 'POST') {
       const b = await readBody(req);
+      ev = store.read('evaluations', p[1]);
+      if (!ev) return fail(res, 404, 'Оценка не найдена');
       const c = ev.checklist_snapshot.criteria.find((x) => x.id === b.criterion_id);
       if (!c) return fail(res, 400, 'Критерий не найден');
       if (!String(b.comment || '').trim()) return fail(res, 400, 'Добавьте комментарий');
@@ -507,15 +628,17 @@ async function handleApi(req, res, url) {
       };
       ev.appeals.push(ap);
       store.write('evaluations', ev.id, ev);
-      return send(res, 201, ev);
+      return send(res, 201, evaluationView(ev));
     }
 
     // решение проверяющего
     if (p[2] === 'appeals' && p.length === 5 && p[4] === 'decision' && m === 'POST') {
+      const b = await readBody(req);
+      ev = store.read('evaluations', p[1]);
+      if (!ev) return fail(res, 404, 'Оценка не найдена');
       const ap = ev.appeals.find((a) => a.id === p[3]);
       if (!ap) return fail(res, 404, 'Апелляция не найдена');
       if (ap.status !== 'open') return fail(res, 400, 'Апелляция уже рассмотрена');
-      const b = await readBody(req);
       if (!['confirm', 'change'].includes(b.action)) return fail(res, 400, 'action должен быть confirm или change');
       if (!String(b.reason || '').trim()) return fail(res, 400, 'Укажите причину решения');
       const totalBefore = ev.final_result.total;
@@ -535,7 +658,7 @@ async function handleApi(req, res, url) {
       ap.decision.total_before = totalBefore;
       ap.decision.total_after = ev.final_result.total;
       store.write('evaluations', ev.id, ev);
-      return send(res, 200, ev);
+      return send(res, 200, evaluationView(ev));
     }
     if (p.length === 2 && m === 'DELETE') {
       store.remove('evaluations', ev.id);
@@ -559,12 +682,27 @@ async function handleApi(req, res, url) {
     return send(res, 200, out);
   }
 
+  // Official submission format (Appendix, JSON 1.0). The original source controls coverage.
+  if (p[0] === 'export.json' && p.length === 1 && m === 'GET') {
+    if (!q.group_id) return fail(res, 400, 'Укажите group_id');
+    const dataset = store.read('datasets', q.group_id);
+    const checklist = store.read('checklists', q.checklist_id || 'default');
+    if (!dataset || !checklist) return fail(res, 404, 'Набор или чек-лист не найден');
+    const output = buildSubmission({ dataset, checklist, evaluations: [...store.list('evaluations'), ...store.list('failures')], teamName: q.team_name, split: q.split });
+    return send(res, 200, JSON.stringify(output, null, 2), { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': 'attachment; filename="results.json"', 'Cache-Control': 'no-store' });
+  }
+
   // /api/export.csv — выгрузка итогов
   if (p[0] === 'export.csv' && m === 'GET') {
     const evs = latestEvals(q.group_id, q.checklist_id);
     const critIds = [...new Set(evs.flatMap((e) => e.checklist_snapshot.criteria.map((c) => c.id)))];
-    const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-    const head = ['conversation_id', 'group_id', 'channel', 'language', 'checklist', 'version', 'original_total', 'final_total', 'gross_error', ...critIds];
+    const esc = (v) => {
+      const value = String(v ?? '');
+      // Кавычки CSV не защищают от формул при открытии файла в Excel.
+      const safe = /^[\s\u0000-\u001f]*[=+@-]/.test(value) ? "'" + value : value;
+      return `"${safe.replace(/"/g, '""')}"`;
+    };
+    const head = ['conversation_id', 'group_id', 'channel', 'language', 'checklist', 'version', 'original_total', 'final_total', 'gross_error', 'status', ...critIds];
     const lines = [head.join(',')];
     for (const e of evs) {
       const ans = critIds.map((id) => {
@@ -573,7 +711,8 @@ async function handleApi(req, res, url) {
         if (!c) return '';
         return c.answer === 'SCORE' ? `${c.value} (${r?.points})` : `${c.answer}${r && r.points != null ? ' (' + r.points + ')' : ''}`;
       });
-      lines.push([e.conversation_id, e.group_id, e.channel, e.language, e.checklist.name, e.checklist.version, e.original_result.total, e.final_result.total, e.final_result.gross_error ? 'YES' : 'NO', ...ans].map(esc).join(','));
+      const gross = flagStatus(e).gross_error_unknown ? 'UNKNOWN' : e.final_result.gross_error ? 'YES' : 'NO';
+      lines.push([e.conversation_id, e.group_id, e.channel, e.language, e.checklist.name, e.checklist.version, e.original_result.total, e.final_result.total, gross, e.status || 'ok', ...ans].map(esc).join(','));
     }
     return send(res, 200, '﻿' + lines.join('\n'), { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="cqa-results.csv"' });
   }
@@ -581,25 +720,58 @@ async function handleApi(req, res, url) {
   return fail(res, 404, 'Неизвестный маршрут API');
 }
 
-const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-  if (req.method === 'OPTIONS') return send(res, 204, '', { 'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type' });
+async function dispatch(req, res) {
   try {
+    const url = new URL(req.url, 'http://localhost');
+    // Local-only service must not be exposed through an attacker-controlled DNS name.
+    if (!store.cloudMode && ['127.0.0.1', 'localhost', '::1'].includes(cfg.HOST)) {
+      let hostname;
+      try { hostname = new URL('http://' + req.headers.host).hostname.toLowerCase().replace(/\.$/, ''); }
+      catch (_) { return fail(res, 400, 'Некорректный Host'); }
+      if (!['127.0.0.1', 'localhost', '[::1]'].includes(hostname)) return fail(res, 421, 'Для локального приложения используйте localhost или 127.0.0.1');
+    }
+    const origin = req.headers.origin;
+    if (origin) {
+      const sameOrigin = isSameOrigin(req, origin, store.cloudMode);
+      if (!sameOrigin && !cfg.CORS_ORIGINS.includes(origin)) return fail(res, 403, 'Этот источник не разрешён. Для встраивания настройте CORS_ORIGINS.');
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+    }
+    if (req.method === 'OPTIONS') return send(res, 204, '', { 'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type' });
     if (url.pathname.startsWith('/api/')) return await handleApi(req, res, url);
     return serveStatic(req, res, url.pathname);
   } catch (e) {
-    console.error(e);
+    // Ошибки входных данных ожидаемы; не засоряем журнал их stack trace.
+    if (!e.status || e.status >= 500) console.error(e);
     const st = Number.isInteger(e.status) && e.status >= 400 && e.status < 600 ? e.status : e.status ? 502 : 500;
     return fail(res, st, e.message || 'Ошибка сервера');
   }
-});
+}
+
+async function handler(req, res) {
+  if (!authorize(req, res, cfg)) return;
+  // Static assets need no workspace transaction; they still require authorization.
+  if (!store.cloudMode || !req.url.split('?')[0].startsWith('/api/')) return dispatch(req, res);
+  const response = new HttpBuffer();
+  try {
+    const { withCloudStore } = require('./src/cloud-store');
+    await withCloudStore({ readOnly: ['GET', 'HEAD', 'OPTIONS'].includes(req.method) }, () => dispatch(req, response));
+    response.flush(res);
+  } catch (error) {
+    // Connection strings and database diagnostics must stay out of the HTTP body.
+    const status = error.status === 409 ? 409 : 503;
+    return fail(res, status, error.publicMessage || 'Хранилище временно недоступно. Повторите запрос.');
+  }
+}
+
+const server = http.createServer(handler);
 
 if (require.main === module) {
-  server.listen(cfg.PORT, () => {
+  server.listen(cfg.PORT, cfg.HOST, () => {
     console.log(`CQA запущен: http://localhost:${cfg.PORT}`);
     console.log(`ИИ: ${cfg.provider} / ${cfg.model}${cfg.provider === 'mock' ? '  (ДЕМО без ключа — задайте ключ в .env)' : ''}`);
     console.log(`API данных: ${cfg.DATA_API_URL ? 'настроен' : 'НЕ настроен (DATA_API_URL в .env)'}`);
   });
 }
 
-module.exports = { server, normalizeRecords };
+module.exports = { server, handler, normalizeRecords, readBody };

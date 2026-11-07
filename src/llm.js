@@ -10,6 +10,7 @@
  * Возвращает {text, usage:{input, output, thoughts}, metrics:{http_attempts, request_ms, wait_ms, structured}}.
  */
 const cfg = require('./config');
+const { safeFailureMessage } = require('./evaluation-failure');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let schemaSupported = true; // выключается на время работы процесса, если API отклонил схему
@@ -36,12 +37,13 @@ async function postJson(url, headers, body, metrics) {
   try {
     const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body), signal: ctrl.signal });
     const text = await res.text();
-    if (!res.ok) throw new LlmError(`LLM HTTP ${res.status}: ${text.slice(0, 400)}`, res.status, parseRetryAfter(res, text));
-    return JSON.parse(text);
+    if (!res.ok) throw new LlmError(safeFailureMessage(`LLM HTTP ${res.status}: ${text}`).slice(0, 400), res.status, parseRetryAfter(res, text));
+    try { return JSON.parse(text); }
+    catch (_) { throw new LlmError('LLM: API вернул некорректный JSON', 'invalid_json'); }
   } catch (e) {
     if (e.name === 'AbortError') throw new LlmError(`LLM: тайм-аут ${Math.round(cfg.LLM_TIMEOUT_MS / 1000)} с`, 'timeout');
     if (e instanceof LlmError) throw e;
-    throw new LlmError(`LLM: сетевая ошибка (${e.message})`, 'network');
+    throw new LlmError(safeFailureMessage(`LLM: сетевая ошибка (${e.message})`), 'network');
   } finally {
     clearTimeout(timer);
     metrics.request_ms += Date.now() - t0;
@@ -67,6 +69,12 @@ async function withRetry(fn, metrics) {
 }
 
 const isGemini3 = () => /^gemini-3/i.test(cfg.model);
+const tokenCount = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
+function recordUsage(metrics, input, output, thoughts = 0) {
+  const usage = { input: tokenCount(input), output: tokenCount(output), thoughts: tokenCount(thoughts) };
+  metrics.usage = usage;
+  return usage;
+}
 
 async function gemini(system, user, schema, metrics) {
   if (!cfg.keys.gemini) throw new Error('Не задан GEMINI_API_KEY в .env');
@@ -92,12 +100,13 @@ async function gemini(system, user, schema, metrics) {
     } else throw e;
   }
   metrics.structured = !!generationConfig.responseJsonSchema;
+  const u = j.usageMetadata || {};
+  const usage = recordUsage(metrics, u.promptTokenCount, u.candidatesTokenCount, u.thoughtsTokenCount);
   const cand = j.candidates?.[0];
   if (!cand) throw new LlmError(`LLM: пустой ответ (${JSON.stringify(j.promptFeedback || {}).slice(0, 200)})`, 'empty');
   metrics.finish_reason = cand.finishReason || null;
   const text = (cand.content?.parts || []).filter((p) => !p.thought).map((p) => p.text || '').join('');
-  const u = j.usageMetadata || {};
-  return { text, usage: { input: u.promptTokenCount || 0, output: u.candidatesTokenCount || 0, thoughts: u.thoughtsTokenCount || 0 } };
+  return { text, usage };
 }
 
 async function deepseek(system, user, schema, metrics) {
@@ -113,25 +122,35 @@ async function deepseek(system, user, schema, metrics) {
   if (cfg.DEEPSEEK_REASONING_EFFORT) body.reasoning_effort = cfg.DEEPSEEK_REASONING_EFFORT;
   if (cfg.MAX_OUTPUT_TOKENS) body.max_tokens = cfg.MAX_OUTPUT_TOKENS;
   const j = await withRetry(() => postJson(`${cfg.DEEPSEEK_BASE_URL}/chat/completions`, { Authorization: `Bearer ${cfg.keys.deepseek}` }, body, metrics), metrics);
+  // Record provider-reported usage before checking the response shape: a blocked
+  // or otherwise unusable completion may still have consumed billable tokens.
+  const thoughts = tokenCount(j.usage?.completion_tokens_details?.reasoning_tokens);
+  const usage = recordUsage(metrics, j.usage?.prompt_tokens, Math.max(0, tokenCount(j.usage?.completion_tokens) - thoughts), thoughts);
   const choice = j.choices?.[0];
   if (!choice) throw new LlmError('LLM: пустой ответ', 'empty');
   metrics.structured = false;
   metrics.finish_reason = choice.finish_reason || null;
   // completion_tokens включает токены размышления; разделяем их, как у Gemini.
-  const thoughts = j.usage?.completion_tokens_details?.reasoning_tokens || 0;
-  return { text: choice.message?.content || '', usage: { input: j.usage?.prompt_tokens || 0, output: Math.max(0, (j.usage?.completion_tokens || 0) - thoughts), thoughts } };
+  return { text: choice.message?.content || '', usage };
 }
 
 async function openai(system, user, schema, metrics) {
   if (!cfg.keys.openai) throw new Error('Не задан OPENAI_API_KEY в .env');
-  const j = await withRetry(() => postJson(`${cfg.OPENAI_BASE_URL}/chat/completions`, { Authorization: `Bearer ${cfg.keys.openai}` }, {
+  const body = {
     model: cfg.model,
     temperature: cfg.TEMPERATURE ?? 0,
     response_format: { type: 'json_object' },
     messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-  }, metrics), metrics);
+  };
+  if (cfg.MAX_OUTPUT_TOKENS) body.max_completion_tokens = cfg.MAX_OUTPUT_TOKENS;
+  const j = await withRetry(() => postJson(`${cfg.OPENAI_BASE_URL}/chat/completions`, { Authorization: `Bearer ${cfg.keys.openai}` }, body, metrics), metrics);
   metrics.structured = false;
-  return { text: j.choices?.[0]?.message?.content || '', usage: { input: j.usage?.prompt_tokens || 0, output: j.usage?.completion_tokens || 0, thoughts: 0 } };
+  const thoughts = tokenCount(j.usage?.completion_tokens_details?.reasoning_tokens);
+  const usage = recordUsage(metrics, j.usage?.prompt_tokens, Math.max(0, tokenCount(j.usage?.completion_tokens) - thoughts), thoughts);
+  const choice = j.choices?.[0];
+  if (!choice) throw new LlmError('LLM: пустой ответ', 'empty');
+  metrics.finish_reason = choice.finish_reason || null;
+  return { text: choice.message?.content || '', usage };
 }
 
 async function anthropic(system, user, schema, metrics) {
@@ -144,7 +163,10 @@ async function anthropic(system, user, schema, metrics) {
     messages: [{ role: 'user', content: user }],
   }, metrics), metrics);
   metrics.structured = false;
-  return { text: (j.content || []).map((c) => c.text || '').join(''), usage: { input: j.usage?.input_tokens || 0, output: j.usage?.output_tokens || 0, thoughts: 0 } };
+  const usage = recordUsage(metrics, j.usage?.input_tokens, j.usage?.output_tokens);
+  metrics.finish_reason = j.stop_reason || null;
+  if (!Array.isArray(j.content) || !j.content.length) throw new LlmError('LLM: пустой ответ', 'empty');
+  return { text: j.content.map((c) => c.text || '').join(''), usage };
 }
 
 /** Один логический запрос к модели (внутри — ограниченные повторы временных ошибок). */
@@ -156,8 +178,9 @@ async function complete(system, user, schema) {
     const r = await fn(system, user, schema, metrics);
     return { ...r, metrics };
   } catch (e) {
-    e.metrics = metrics;
-    throw e;
+    const error = new LlmError(safeFailureMessage(e), e?.status, e?.retryAfterMs);
+    error.metrics = metrics;
+    throw error;
   }
 }
 

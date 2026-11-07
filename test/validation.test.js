@@ -79,6 +79,22 @@ t('каждый критерий ровно один раз, неизвестн�
   assert.strictEqual(computeScore(cl, v.criteria).total, null);
 });
 
+t('неверные JSON-типы ответа модели дают ошибки валидации и не ломают обработку', () => {
+  const v = mutate((g) => {
+    g.operator_name = { toString: 1 };
+    g.criteria[0].explanation = { toString: 1 };
+    g.criteria[0].evidence = [{ msg: { toString: 1 }, fragment: { toString: 1 } }];
+    g.criteria[1].na_reason = { toString: 1 };
+    g.criteria[1].unverified_claims = [null, { toString: 1 }];
+    g.criteria.push({ id: { toString: 1 } });
+    g.coaching = [{ criterion_id: 'c01', text: { toString: 1 } }];
+  });
+  assert.ok(v.errors.length > 0);
+  assert.strictEqual(v.operator_name, null);
+  assert.deepStrictEqual(v.coaching, []);
+  assert.deepStrictEqual(v.criteria.c02.unverified_claims, []);
+});
+
 t('одно и то же объяснение, скопированное в несколько критериев, помечается', () => {
   const same = 'Оператор проигнорировал вопрос клиента и завершил диалог отпиской.';
   const v = mutate((g) => { g.criteria[3].explanation = same; g.criteria[4].explanation = same; g.criteria[5].explanation = same; });

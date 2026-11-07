@@ -11,9 +11,10 @@ const cfg = require('./config');
 const llm = require('./llm');
 const mock = require('./mock');
 const { computeScore, validateAnswer, allowedAnswers, round } = require('./scoring');
+const { safeFailureMessage } = require('./evaluation-failure');
 
 // Меняйте при любом изменении инструкций/формата — это часть ключа кэша.
-const PROMPT_VERSION = '2026-11-07.5';
+const PROMPT_VERSION = '2026-11-07.7';
 
 const SPEAKER_RU = { operator: 'ОПЕРАТОР', client: 'КЛИЕНТ', bot: 'БОТ', system: 'СИСТЕМА' };
 const sha = (x) => crypto.createHash('sha256').update(typeof x === 'string' ? x : JSON.stringify(x)).digest('hex');
@@ -83,6 +84,7 @@ const SYSTEM_PROMPT = `Ты — эксперт отдела контроля к�
 - Каждый критерий оценивай только по его определению. Одну реплику можно использовать в нескольких критериях, но объяснение каждого должно говорить, почему именно этот критерий выполнен/не выполнен. Не копируй одно основание во все критерии.
 - Консультация — полнота и правильность решения запроса. Ведение диалога — ясность, связность, порядок ответов, предупреждение об ожидании. Эмпатия — вежливость и реакция на конкретную проблему, если клиент выразил недовольство или описал неудобство. Завершение — только условие завершения из определения.
 - Неотвеченный вопрос клиента снижает консультацию. Он не является сам по себе сбоем ведения диалога, отсутствием эмпатии или отсутствием завершения; снижай их, только если есть отдельное основание по их определению, и назови его.
+- Если критерий оценивает ясность, грамотность, связность, порядок ответов и предупреждение о явном ожидании (ведение диалога), для снижения укажи самостоятельный наблюдаемый сбой именно в этих свойствах и реплики, где он проявился. Неполное решение или отсутствие следующего шага относятся к консультации; невежливость и этические нарушения — к эмпатии и грубым ошибкам; отсутствие предложения помощи или прощания — к завершению. Сами по себе эти нарушения не означают неясности, бессвязности, неправильного порядка или нарушения работы с ожиданием: не переноси их штраф в ведение диалога. Если есть отдельный сбой общения, оцени его независимо по описаниям ступеней текущего чек-листа.
 - Если в определении «A ИЛИ B» — достаточно одного из них. Не требуй больше, чем написано в определении.
 
 ОТВЕТЫ
@@ -158,7 +160,8 @@ ${computeFacts(record)}
 const norm = (s) => String(s ?? '').toLowerCase().replace(/[«»“”"'`]/g, '').replace(/[‐-―]/g, '-').replace(/\s+/g, ' ').trim();
 
 function parseMsgId(ref, n) {
-  const m = String(ref ?? '').trim().match(/^m(\d+)$/i);
+  if (typeof ref !== 'string') return { error: 'ID доказательства должен быть строкой m<номер>' };
+  const m = ref.trim().match(/^m(\d+)$/i);
   if (!m) return { error: `ID «${ref}» не в формате m<номер>` };
   const i = Number(m[1]);
   if (i >= n) return { error: `реплики ${ref} нет в диалоге (m0–m${n - 1})` };
@@ -186,22 +189,23 @@ function validateOutput(checklist, record, parsed) {
   const list = Array.isArray(parsed && parsed.criteria) ? parsed.criteria : [];
   if (!Array.isArray(parsed && parsed.criteria)) errors.push({ criterion: null, message: 'нет массива criteria' });
 
-  const seen = {};
+  const seen = Object.create(null);
   for (const item of list) {
-    const id = String(item && item.id);
+    const id = typeof item?.id === 'string' ? item.id : '';
     seen[id] = (seen[id] || 0) + 1;
     if (!checklist.criteria.some((c) => c.id === id)) errors.push({ criterion: id, message: `неизвестный критерий ${id}` });
   }
   for (const [id, cnt] of Object.entries(seen)) if (cnt > 1) errors.push({ criterion: id, message: `критерий ${id} оценён ${cnt} раза` });
 
   for (const c of checklist.criteria) {
-    const raw = list.find((x) => String(x && x.id) === c.id);
+    const raw = list.find((x) => x?.id === c.id);
     const errs = [];
     if (!raw) {
       errors.push({ criterion: c.id, message: `нет оценки критерия ${c.id}` });
       out[c.id] = { answer: 'INVALID', value: null, explanation: '', evidence: [], missing_range: null, checked_range: null, na_reason: null, unverified_claims: [], issues: ['Модель не вернула оценку'] };
       continue;
     }
+    if (seen[c.id] > 1) errs.push('Модель вернула несколько оценок этого критерия');
     let ans;
     try {
       ans = validateAnswer(c, { answer: raw.answer, value: raw.score ?? raw.value });
@@ -209,7 +213,7 @@ function validateOutput(checklist, record, parsed) {
       errs.push(e.message);
       ans = { answer: 'INVALID', value: null };
     }
-    const explanation = String(raw.explanation || '').trim();
+    const explanation = typeof raw.explanation === 'string' ? raw.explanation.trim() : '';
     if (!explanation) errs.push('пустое объяснение');
 
     const evidence = [];
@@ -217,13 +221,14 @@ function validateOutput(checklist, record, parsed) {
       const p = parseMsgId(e && e.msg, n);
       if (p.error) { errs.push(`доказательство: ${p.error}`); continue; }
       const full = String(tr[p.index].text ?? '');
-      const frag = String((e && e.fragment) || '').trim();
+      const frag = typeof e?.fragment === 'string' ? e.fragment.trim() : '';
+      if (e?.fragment != null && typeof e.fragment !== 'string') errs.push('фрагмент доказательства должен быть строкой');
       if (frag && !norm(full).includes(norm(frag))) { errs.push(`фрагмент «${frag.slice(0, 60)}» не входит в реплику m${p.index}`); continue; }
       if (!evidence.some((x) => x.msg === p.index)) evidence.push({ msg: p.index, fragment: frag || null });
     }
     const missing = parseRange(raw.missing_range, n, 'missing_range', errs);
     const checked = parseRange(raw.checked_range, n, 'checked_range', errs);
-    const naReason = ans.answer === 'NA' ? String(raw.na_reason || '').trim() : null;
+    const naReason = ans.answer === 'NA' ? typeof raw.na_reason === 'string' ? raw.na_reason.trim() : '' : null;
 
     // наличие необходимых оснований
     if (ans.answer === 'NA') {
@@ -246,33 +251,36 @@ function validateOutput(checklist, record, parsed) {
       missing_range: missing,
       checked_range: checked,
       na_reason: naReason,
-      unverified_claims: (Array.isArray(raw.unverified_claims) ? raw.unverified_claims : []).map((x) => String(x).trim()).filter(Boolean).slice(0, 5),
+      unverified_claims: (Array.isArray(raw.unverified_claims) ? raw.unverified_claims : []).filter((x) => typeof x === 'string').map((x) => x.trim()).filter(Boolean).slice(0, 5),
       issues: errs,
     };
   }
 
-  // механическое копирование одного основания в несколько критериев
-  const byText = {};
-  for (const c of checklist.criteria) {
-    const t = norm(out[c.id].explanation);
-    if (t.length > 20) (byText[t] = byText[t] || []).push(c.id);
-  }
-  for (const ids of Object.values(byText)) if (ids.length > 1) for (const id of ids) {
-    const m = `одинаковое объяснение у критериев ${ids.join(', ')} — нужно отдельное основание по определению каждого`;
-    out[id].issues.push(m);
-    errors.push({ criterion: id, message: `${id}: ${m}` });
-  }
+  checkDuplicateExplanations(checklist, out, errors);
 
   const coaching = (Array.isArray(parsed && parsed.coaching) ? parsed.coaching : [])
-    .filter((x) => x && checklist.criteria.some((c) => c.id === x.criterion_id) && String(x.text || '').trim())
-    .map((x) => ({ criterion_id: x.criterion_id, type: x.type === 'required' ? 'required' : 'optional', text: String(x.text).trim() }))
+    .filter((x) => x && checklist.criteria.some((c) => c.id === x.criterion_id) && typeof x.text === 'string' && x.text.trim())
+    .map((x) => ({ criterion_id: x.criterion_id, type: x.type === 'required' ? 'required' : 'optional', text: x.text.trim() }))
     .slice(0, 3);
 
   return { criteria: out, errors, operator_name: cleanName(parsed && parsed.operator_name), coaching };
 }
 
+function checkDuplicateExplanations(checklist, criteria, errors) {
+  const byText = new Map();
+  for (const c of checklist.criteria) {
+    const text = norm(criteria[c.id].explanation);
+    if (text.length > 20) byText.set(text, [...(byText.get(text) || []), c.id]);
+  }
+  for (const ids of byText.values()) if (ids.length > 1) for (const id of ids) {
+    const message = `одинаковое объяснение у критериев ${ids.join(', ')} — нужно отдельное основание по определению каждого`;
+    if (!criteria[id].issues.includes(message)) criteria[id].issues.push(message);
+    if (!errors.some((error) => error.criterion === id && error.message === `${id}: ${message}`)) errors.push({ criterion: id, message: `${id}: ${message}` });
+  }
+}
+
 function cleanName(v) {
-  const s = String(v ?? '').trim().replace(/[«»"'.!,]/g, '');
+  const s = typeof v === 'string' ? v.trim().replace(/[«»"'.!,]/g, '') : '';
   if (!s || /^(null|none|нет|unknown|неизвестно)$/i.test(s) || s.length > 40) return null;
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
@@ -288,7 +296,7 @@ function reconcileCoaching(coaching, checklist, criteria) {
 }
 
 /** Итоговый вывод строится из результатов критериев — он не может им противоречить. */
-function buildSummary(checklist, criteria, result) {
+function buildSummary(checklist, criteria, result, globalErrors = []) {
   const label = (c) => `«${c.title}»`;
   const met = [], lowered = [], na = [], review = [];
   for (const c of checklist.criteria) {
@@ -303,17 +311,27 @@ function buildSummary(checklist, criteria, result) {
   if (met.length) parts.push(`Выполнено: ${met.join(', ')}.`);
   if (lowered.length) parts.push(`Снижено: ${lowered.join(', ')}.`);
   if (na.length) parts.push(`Неприменимо (N/A): ${na.join(', ')}.`);
-  parts.push(result.gross_error ? 'Выявлена грубая ошибка.' : 'Грубых ошибок не выявлено.');
+  const unresolvedFlag = checklist.criteria.some((c) => c.type === 'flag' && (!criteria[c.id] || criteria[c.id].answer === 'INVALID' || criteria[c.id].review_required));
+  parts.push(result.gross_error ? 'Выявлена грубая ошибка.' : unresolvedFlag ? 'Проверка грубых ошибок не завершена.' : 'Грубых ошибок не выявлено.');
   const unverified = checklist.criteria.filter((c) => (criteria[c.id]?.unverified_claims || []).length).map(label);
   if (unverified.length) parts.push(`Фактическая корректность информации оператора не проверена по базе знаний (${unverified.join(', ')}).`);
   if (review.length) parts.push(`Требует проверки человеком: ${review.join(', ')}.`);
+  if (globalErrors.length) parts.push('Структура ответа модели требует проверки человеком.');
   return parts.join(' ');
 }
 
 // ---------- ключ кэша ----------
 
 function settingsFingerprint() {
-  return { provider: cfg.provider, model: cfg.model, samples: cfg.provider === 'mock' ? 1 : cfg.SAMPLES, temperature: cfg.TEMPERATURE, thinking: cfg.GEMINI_THINKING_LEVEL || cfg.DEEPSEEK_REASONING_EFFORT || null, structured: cfg.STRUCTURED_OUTPUT, repair: cfg.REPAIR_ATTEMPTS, prompt: PROMPT_VERSION, kb: null };
+  const thinking = cfg.provider === 'gemini' ? cfg.GEMINI_THINKING_LEVEL : cfg.provider === 'deepseek' ? cfg.DEEPSEEK_REASONING_EFFORT : null;
+  const settings = { provider: cfg.provider, model: cfg.model, samples: cfg.provider === 'mock' ? 1 : cfg.SAMPLES, temperature: cfg.TEMPERATURE, thinking: thinking || null, structured: cfg.STRUCTURED_OUTPUT, repair: cfg.REPAIR_ATTEMPTS, prompt: PROMPT_VERSION, kb: null };
+  // Preserve the existing default cache: paid DEV evaluations remain reusable.
+  // Overrides that change which service or completion is used need a new key.
+  if (cfg.MAX_OUTPUT_TOKENS != null) settings.max_output_tokens = cfg.MAX_OUTPUT_TOKENS;
+  const endpoint = cfg.provider === 'deepseek' ? cfg.DEEPSEEK_BASE_URL : cfg.provider === 'openai' ? cfg.OPENAI_BASE_URL : null;
+  const standardEndpoint = cfg.provider === 'deepseek' ? 'https://api.deepseek.com' : 'https://api.openai.com/v1';
+  if (endpoint && endpoint.replace(/\/+$/, '') !== standardEndpoint) settings.endpoint_hash = sha(endpoint.replace(/\/+$/, ''));
+  return settings;
 }
 function checklistContent(cl) {
   return { name: cl.name, notes: cl.notes || '', rounding: cl.rounding, sections: cl.sections || [], criteria: cl.criteria };
@@ -353,15 +371,19 @@ async function runOnce(record, checklist, timing) {
     try {
       res = await llm.complete(system, prompt, schema);
     } catch (e) {
-      timing.calls.push({ kind: attempt ? 'repair' : 'initial', ok: false, error: String(e.message).slice(0, 160), ...(e.metrics || {}), ms: Date.now() - t0 });
+      timing.calls.push({ kind: attempt ? 'repair' : 'initial', ok: false, ...(e.metrics || {}), usage: measuredUsage(e.metrics?.usage), error: safeFailureMessage(e).slice(0, 160), ms: Date.now() - t0 });
       throw e;
     }
-    usage = { input: usage.input + res.usage.input, output: usage.output + res.usage.output, thoughts: usage.thoughts + res.usage.thoughts };
+    const callUsage = measuredUsage(res.usage);
+    usage = addUsage(usage, callUsage);
+    const call = { kind: attempt ? 'repair' : 'initial', ok: true, ...res.metrics, usage: callUsage, ms: Date.now() - t0 };
+    timing.calls.push(call);
     const v0 = Date.now();
     try { parsed = llm.parseJson(res.text); } catch (e) { parsed = null; }
     const v = parsed ? validateOutput(checklist, record, parsed) : { criteria: {}, errors: [{ criterion: null, message: 'ответ модели не является JSON' }], coaching: [], operator_name: null };
     timing.validation_ms += Date.now() - v0;
-    timing.calls.push({ kind: attempt ? 'repair' : 'initial', ok: true, errors: v.errors.length, ...res.metrics, ms: Date.now() - t0 });
+    call.errors = v.errors.length;
+    call.ms = Date.now() - t0;
     last = v;
     if (!v.errors.length) break;
     if (attempt < cfg.REPAIR_ATTEMPTS) {
@@ -382,41 +404,94 @@ ${String(res.text).slice(0, 12000)}`;
   return { ...last, usage };
 }
 
+function measuredUsage(usage) {
+  return Object.fromEntries(['input', 'output', 'thoughts'].map((key) => [key, typeof usage?.[key] === 'number' && Number.isFinite(usage[key]) && usage[key] >= 0 ? usage[key] : 0]));
+}
+function addUsage(a, b) {
+  return { input: a.input + b.input, output: a.output + b.output, thoughts: a.thoughts + b.thoughts };
+}
+function measuredWork(timing, startedAt, samples, successfulSamples) {
+  const usage = timing.calls.reduce((total, call) => addUsage(total, measuredUsage(call.usage)), { input: 0, output: 0, thoughts: 0 });
+  timing.total_ms = Date.now() - startedAt;
+  timing.llm_ms = timing.calls.reduce((sum, call) => sum + (call.request_ms || 0), 0);
+  timing.retry_wait_ms = timing.calls.reduce((sum, call) => sum + (call.wait_ms || 0), 0);
+  timing.http_attempts = timing.calls.reduce((sum, call) => sum + (call.http_attempts || 0), 0);
+  const cost = (usage.input * cfg.PRICE_IN_PER_M + (usage.output + usage.thoughts) * cfg.PRICE_OUT_PER_M) / 1e6;
+  return { usage, cost_usd: round(cost, 6), duration_ms: timing.total_ms, timing, samples, successful_samples: successfulSamples };
+}
+
+/** Keep the chosen proof, errors and coaching from the same sample. */
+function combineRuns(runs, checklist) {
+  if (runs.length === 1) return runs[0];
+  const criteria = {}, selected = new Map();
+  for (const c of checklist.criteria) {
+    const candidates = runs.map((run) => run.criteria[c.id]);
+    // An invalid answer or broken evidence cannot outvote a validated candidate.
+    const valid = candidates.filter((candidate) => candidate.answer !== 'INVALID' && !(candidate.issues || []).length);
+    const chosen = vote(valid.length ? valid : candidates);
+    criteria[c.id] = { ...chosen, issues: [...(chosen.issues || [])], agreement: { agree: candidates.filter((candidate) => candidate.answer === chosen.answer && candidate.value === chosen.value).length, runs: candidates.length } };
+    selected.set(c.id, runs[candidates.indexOf(chosen)]);
+  }
+  const errors = Object.entries(criteria).flatMap(([id, criterion]) => (criterion.issues || []).map((message) => ({ criterion: id, message: `${id}: ${message}` })));
+  checkDuplicateExplanations(checklist, criteria, errors);
+  // Preserve unscoped response-shape errors only when their sample contributes
+  // to the selected result; discarded runs must not leave stale validation errors.
+  const usedRuns = new Set(selected.values());
+  for (const run of usedRuns) for (const error of run.errors || []) {
+    if (!checklist.criteria.some((criterion) => criterion.id === error.criterion)) errors.push(error);
+  }
+  const coaching = checklist.criteria.flatMap((criterion) => (selected.get(criterion.id).coaching || []).filter((item) => item.criterion_id === criterion.id)).slice(0, 3);
+  return { criteria, errors, operator_name: runs[0].operator_name, coaching };
+}
+
 const inflight = new Map();
 
 /** Публичная функция оценки. Одинаковые одновременные запросы (тот же ключ) объединяются. */
 function evaluate(record, checklist, groupId, opts = {}) {
   const key = cacheKey(record, checklist);
-  if (inflight.has(key)) return inflight.get(key);
-  const p = doEvaluate(record, checklist, groupId, key, opts).finally(() => inflight.delete(key));
-  inflight.set(key, p);
+  // Результат содержит историю апелляций группы, поэтому объединяем только запросы этой группы.
+  const requestKey = JSON.stringify([groupId, key]);
+  if (inflight.has(requestKey)) return inflight.get(requestKey);
+  const p = doEvaluate(record, checklist, groupId, key, opts).finally(() => inflight.delete(requestKey));
+  inflight.set(requestKey, p);
   return p;
 }
 
 async function doEvaluate(record, checklist, groupId, key, opts) {
+  // Freeze the exact source before awaiting the model. Later imports or caller
+  // mutations must not change the transcript behind this evaluation's proof IDs.
+  const recordSnapshot = JSON.parse(JSON.stringify({
+    conversation_id: record.conversation_id,
+    channel: record.channel,
+    language: record.language,
+    transcript: record.transcript,
+    audio_url: record.audio_url ?? null,
+  }));
+  record = recordSnapshot;
+  checklist = JSON.parse(JSON.stringify(checklist));
   const t0 = Date.now();
   const timing = { queue_ms: opts.queue_ms || 0, calls: [], validation_ms: 0, total_ms: 0 };
-  let usage = { input: 0, output: 0, thoughts: 0 };
+  let successfulSamples = 1;
   let v;
 
   if (cfg.provider === 'mock') {
     const parsed = mock.evaluate(record, checklist);
     v = validateOutput(checklist, record, parsed);
   } else {
-    const runs = await Promise.all(Array.from({ length: cfg.SAMPLES }, () => runOnce(record, checklist, timing).catch((e) => {
-      if (cfg.SAMPLES === 1) throw e;
-      console.warn(`[eval] ${record.conversation_id}: прогон не удался — ${e.message}`);
-      return null;
-    })));
-    const ok = runs.filter(Boolean);
-    if (!ok.length) throw new Error('Все прогоны модели завершились ошибкой');
-    ok.forEach((r) => (usage = { input: usage.input + r.usage.input, output: usage.output + r.usage.output, thoughts: usage.thoughts + r.usage.thoughts }));
-    v = { ...ok[0], criteria: {} };
-    for (const c of checklist.criteria) {
-      const cands = ok.map((r) => r.criteria[c.id]);
-      v.criteria[c.id] = { ...vote(cands) };
-      if (cands.length > 1) v.criteria[c.id].agreement = { agree: cands.filter((x) => x.answer === v.criteria[c.id].answer && x.value === v.criteria[c.id].value).length, runs: cands.length };
+    // Wait for every concurrent sample before reporting failure, so late billed
+    // responses are included in the measured usage and no work is left behind.
+    const runs = await Promise.allSettled(Array.from({ length: cfg.SAMPLES }, () => runOnce(record, checklist, timing)));
+    const ok = runs.filter((run) => run.status === 'fulfilled').map((run) => run.value);
+    successfulSamples = ok.length;
+    if (!ok.length) {
+      const cause = runs[0].reason;
+      const error = new Error(cfg.SAMPLES === 1 ? safeFailureMessage(cause) : 'Все прогоны модели завершились ошибкой');
+      if (cfg.SAMPLES === 1 && cause?.status != null) error.status = cause.status;
+      error.evaluation_metrics = measuredWork(timing, t0, cfg.SAMPLES, 0);
+      throw error;
     }
+    for (const run of runs) if (run.status === 'rejected') console.warn(`[eval] ${record.conversation_id}: прогон не удался — ${safeFailureMessage(run.reason)}`);
+    v = combineRuns(ok, checklist);
   }
 
   const criteria = {};
@@ -426,21 +501,20 @@ async function doEvaluate(record, checklist, groupId, key, opts) {
   }
   const result = computeScore(checklist, criteria);
   const coaching = reconcileCoaching(v.coaching || [], checklist, criteria);
-  const needsReview = Object.values(criteria).some((x) => x.review_required);
-  const cost = (usage.input * cfg.PRICE_IN_PER_M + (usage.output + usage.thoughts) * cfg.PRICE_OUT_PER_M) / 1e6;
-  timing.total_ms = Date.now() - t0;
-  timing.llm_ms = timing.calls.reduce((s, x) => s + (x.request_ms || 0), 0);
-  timing.retry_wait_ms = timing.calls.reduce((s, x) => s + (x.wait_ms || 0), 0);
-  timing.http_attempts = timing.calls.reduce((s, x) => s + (x.http_attempts || 0), 0);
+  const globalErrors = (v.errors || []).filter((error) => !checklist.criteria.some((criterion) => criterion.id === error.criterion)).map((error) => error.message);
+  const needsReview = (v.errors || []).length > 0 || Object.values(criteria).some((x) => x.review_required);
+  const work = measuredWork(timing, t0, cfg.provider === 'mock' ? 1 : cfg.SAMPLES, successfulSamples);
+  const usage = work.usage;
   console.log(`[eval] ${record.conversation_id}: ${(timing.total_ms / 1000).toFixed(1)} с, вызовов ${timing.calls.length}, HTTP-попыток ${timing.http_attempts}, ожидание повторов ${(timing.retry_wait_ms / 1000).toFixed(1)} с, токены in/out/think ${usage.input}/${usage.output}/${usage.thoughts}${needsReview ? ', ТРЕБУЕТ ПРОВЕРКИ' : ''}`);
 
   return {
-    id: `${groupId}__${record.conversation_id}__${checklist.id}__v${checklist.version}__${key.slice(0, 10)}${opts.force ? '__' + Date.now().toString(36) : ''}`,
+    id: `${groupId}__${record.conversation_id}__${checklist.id}__v${checklist.version}__${key.slice(0, 10)}${opts.force ? '__' + crypto.randomBytes(6).toString('hex') : ''}`,
     cache_key: key,
     prompt_version: PROMPT_VERSION,
     settings: settingsFingerprint(),
     conversation_id: record.conversation_id,
     transcript_hash: sha(record.transcript).slice(0, 16),
+    record_snapshot: recordSnapshot,
     group_id: groupId,
     channel: record.channel,
     language: record.language,
@@ -449,17 +523,19 @@ async function doEvaluate(record, checklist, groupId, key, opts) {
     provider: cfg.provider,
     model: cfg.model,
     samples: cfg.provider === 'mock' ? 1 : cfg.SAMPLES,
+    successful_samples: successfulSamples,
     status: needsReview ? 'needs_review' : 'ok',
     validation_errors: (v.errors || []).map((e) => e.message),
+    global_validation_errors: globalErrors,
     created_at: new Date().toISOString(),
     duration_ms: timing.total_ms,
     timing,
     usage,
-    cost_usd: round(cost, 6),
+    cost_usd: work.cost_usd,
     knowledge_base: null,
     operator_name: v.operator_name || null,
     coaching,
-    summary: buildSummary(checklist, criteria, result),
+    summary: buildSummary(checklist, criteria, result, globalErrors),
     criteria,
     original_result: result,
     final_criteria: JSON.parse(JSON.stringify(criteria)),
@@ -471,17 +547,27 @@ async function doEvaluate(record, checklist, groupId, key, opts) {
 /** Пересчёт финального результата после решений по апелляциям (та же функция расчёта). */
 function recompute(evaluation) {
   const cl = evaluation.checklist_snapshot;
+  if (!evaluation.original_summary) evaluation.original_summary = evaluation.summary;
+  if (!evaluation.original_coaching) evaluation.original_coaching = JSON.parse(JSON.stringify(evaluation.coaching || []));
   const finalCriteria = JSON.parse(JSON.stringify(evaluation.criteria));
   for (const ap of evaluation.appeals) {
     if (ap.status !== 'resolved' || ap.decision?.action !== 'change') continue;
     const c = cl.criteria.find((x) => x.id === ap.criterion_id);
     if (!c) continue;
     const a = validateAnswer(c, { answer: ap.decision.answer, value: ap.decision.value });
-    finalCriteria[c.id] = { ...finalCriteria[c.id], answer: a.answer, value: a.value, changed_by_appeal: ap.id, reviewer_reason: ap.decision.reason, review_required: false };
+    finalCriteria[c.id] = {
+      ...finalCriteria[c.id], answer: a.answer, value: a.value,
+      changed_by_appeal: ap.id, reviewer_reason: ap.decision.reason,
+      explanation: ap.decision.reason, na_reason: a.answer === 'NA' ? ap.decision.reason : null,
+      issues: [], review_required: false,
+    };
   }
   evaluation.final_criteria = finalCriteria;
   evaluation.final_result = computeScore(cl, finalCriteria);
+  evaluation.summary = buildSummary(cl, finalCriteria, evaluation.final_result, evaluation.global_validation_errors || []);
+  evaluation.coaching = reconcileCoaching(evaluation.original_coaching, cl, finalCriteria);
+  evaluation.status = (evaluation.global_validation_errors || []).length || Object.values(finalCriteria).some((x) => x.review_required || x.answer === 'INVALID' || (x.issues || []).length) ? 'needs_review' : 'ok';
   return evaluation;
 }
 
-module.exports = { evaluate, recompute, cacheKey, validateOutput, buildUserPrompt, buildSchema, buildSummary, computeFacts, vote, SYSTEM_PROMPT, PROMPT_VERSION };
+module.exports = { evaluate, recompute, cacheKey, settingsFingerprint, validateOutput, buildUserPrompt, buildSchema, buildSummary, computeFacts, vote, SYSTEM_PROMPT, PROMPT_VERSION };

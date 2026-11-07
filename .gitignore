@@ -1,8 +1,17 @@
 .env
 node_modules/
+.cache/
+.vercel/
+.env.*
+!.env.example
 data/datasets/
 data/evaluations/
 data/appeals/
+data/failures/
 data/checklists/
+data/jobs/
 *.tmp
 .DS_Store
+tmp/
+output/
+test-artifacts/
