@@ -173,11 +173,12 @@ async function test(name, run) { observed = []; cfg.REPAIR_ATTEMPTS = 0; await r
     await test('call end facts use system events in RU/KZ/EN, not holding or inferred silence', () => {
       for (const text of ['Звонок завершён.', 'Қоңырау аяқталды.', 'Call ended.']) {
         const input = record('voice call'); input.transcript.push({ speaker: 'system', timestamp: '10:01:00', text });
-        assert.ok(computeFacts(input).includes('Событие закрытия/завершения в данных: m2'), text);
+        assert.ok(computeFacts(input).includes('Возможное событие закрытия/завершения, найденное по словам: m2'), text);
       }
       for (const text of ['Call on hold.', 'Запись приостановлена.', 'Звонок не завершён.']) {
         const input = record('voice call'); input.transcript.push({ speaker: 'system', text });
-        assert.ok(computeFacts(input).includes('Системного события закрытия звонка в данных НЕТ'), text);
+        assert.ok(computeFacts(input).includes('Автоматический поиск не выделил системное событие закрытия звонка'), text);
+        assert.ok(computeFacts(input).includes('Это не доказательство отсутствия'), text);
       }
     });
 

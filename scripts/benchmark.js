@@ -5,12 +5,14 @@ const path = require('path');
 const fixtures = { regression: require('../test/fixtures/benchmark-cases.json'), challenge: require('../test/fixtures/benchmark-challenge-cases.json') };
 const checklist = require('../src/default-checklist.json');
 const { validateBenchmarkCases, buildBenchmarkReport, referenceCoverage, digest } = require('../src/benchmark');
+const { openJournal } = require('../src/benchmark-journal');
 
 function parseArgs(args) {
   const options = { live: false, plan: false, out: null, from: null, concurrency: 1, suite: 'regression' };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === '--live') options.live = true;
+    else if (arg === '--resume') options.resume = true;
     else if (arg === '--plan') options.plan = true;
     else if (['--out', '--from', '--concurrency', '--suite'].includes(arg)) {
       if (!args[i + 1] || args[i + 1].startsWith('--')) throw new Error(`${arg} requires a value`);
@@ -24,6 +26,7 @@ function parseArgs(args) {
   if (options.live && options.from) throw new Error('--live and --from are mutually exclusive');
   if (options.plan && (options.live || options.from || options.out)) throw new Error('--plan is read-only and cannot be combined with --live, --from or --out');
   if ((options.live || options.from) && !options.out) throw new Error('--live/--from require --out <report.json>');
+  if (options.resume && !options.live) throw new Error('--resume requires --live and the original --out');
   if (!options.live && !options.from && options.out) throw new Error('--out requires --live or --from; dry-run does not create a report');
   return options;
 }
@@ -75,7 +78,7 @@ function failureCode(error) {
 
 async function main(args = process.argv.slice(2)) {
   const options = parseArgs(args);
-  if (options.help) { console.log('Validate (no API/config): node scripts/benchmark.js [--suite regression|challenge]\nCost scope (config read, no API): node scripts/benchmark.js --suite challenge --plan [--concurrency 1|2]\nLive: node scripts/benchmark.js --suite challenge --live --out output/benchmark/challenge-latest.json [--concurrency 1|2]\nOffline: node scripts/benchmark.js --suite challenge --from outcomes.json --out output/benchmark/challenge-replay.json'); return 0; }
+  if (options.help) { console.log('Validate (no API/config): node scripts/benchmark.js [--suite regression|challenge]\nCost scope (config read, no API): node scripts/benchmark.js --suite challenge --plan [--concurrency 1|2]\nLive: node scripts/benchmark.js --suite challenge --live --out output/benchmark/challenge-latest.json [--concurrency 1|2]\nResume: same live command with --resume (pending cases only, ambiguous dispatches are never retried)\nOffline: node scripts/benchmark.js --suite challenge --from outcomes.json --out output/benchmark/challenge-replay.json'); return 0; }
   const fixture = fixtures[options.suite];
   const errors = validateBenchmarkCases(fixture, checklist);
   if (errors.length) throw new Error(errors.join('\n'));
@@ -95,6 +98,7 @@ async function main(args = process.argv.slice(2)) {
     const unique = (key) => [...new Set(evaluations.map((ev) => ev[key]).filter(Boolean))];
     metadata = { mode: 'offline', started_at: started, finished_at: new Date().toISOString(), identity_source: 'input_evaluations_unverified', providers: unique('provider'), models: unique('model'), prompt_versions: unique('prompt_version') };
   } else {
+    if (!options.resume && fs.existsSync(options.out)) throw new Error('Live output already exists; use a new path for a separately authorized run');
     // Kept below the explicit gate so dry-run/offline do not read credentials or initialize a provider.
     const cfg = require('../src/config');
     if (cfg.provider === 'mock') throw new Error('Live benchmark requires a configured real model; mock results are not quality evidence');
@@ -110,23 +114,40 @@ async function main(args = process.argv.slice(2)) {
       suite: options.suite,
       settings: { samples: cfg.SAMPLES, temperature: cfg.TEMPERATURE, thinking: fingerprint.thinking, structured_output: cfg.STRUCTURED_OUTPUT, repair_attempts: cfg.REPAIR_ATTEMPTS, max_output_tokens: cfg.MAX_OUTPUT_TOKENS, llm_timeout_ms: cfg.LLM_TIMEOUT_MS, llm_max_attempts: cfg.LLM_MAX_ATTEMPTS, price_in_per_m: cfg.PRICE_IN_PER_M, price_out_per_m: cfg.PRICE_OUT_PER_M },
     };
-    outcomes = new Array(fixture.cases.length);
+    // Bind recovery to the exact evaluator implementation as well as the rubric
+    // and settings. A forgotten version bump must not mix two implementations.
+    const sourceFiles = ['evaluator.js', 'evaluation-prompt.js', 'llm.js', 'scoring.js', 'benchmark.js', 'benchmark-journal.js'];
+    const identity = { fixture: digest(fixture), checklist: digest(checklist), metadata: { ...metadata, started_at: null }, source: digest([...sourceFiles.map(file => fs.readFileSync(path.join(__dirname, '../src', file), 'utf8')), fs.readFileSync(__filename, 'utf8')]) };
+    const journal = openJournal(options.out + '.journal.json', { identity, metadata, caseIds: fixture.cases.map(c => c.id), resume: options.resume });
+    metadata = journal.metadata;
+    const pending = journal.pending().map(id => fixture.cases.find(c => c.id === id));
     let cursor = 0;
-    await Promise.all(Array.from({ length: options.concurrency }, async () => {
-      while (cursor < fixture.cases.length) {
-        const index = cursor++, c = fixture.cases[index], t0 = Date.now();
-        try { outcomes[index] = { case_id: c.id, evaluation: await evaluate(c.record, checklist, 'BENCHMARK', { force: true }) }; }
-        catch (error) {
-          const observed = error.evaluation_metrics || {};
-          const status = error.status;
-          const safeStatus = (Number.isInteger(status) && status >= 100 && status <= 599) || ['timeout', 'network', 'invalid_json', 'empty'].includes(status);
-          const billing = Object.fromEntries(['billing_complete', 'unknown_call_count', 'known_usage', 'known_cost_usd'].filter(key => Object.hasOwn(observed, key)).map(key => [key, observed[key]]));
-          outcomes[index] = { case_id: c.id, error: { code: failureCode(error), ...(safeStatus ? { status } : {}) }, duration_ms: observed.duration_ms ?? Date.now() - t0, timing: observed.timing || null, usage: observed.usage || null, cost_usd: observed.cost_usd ?? null, ...billing };
-          console.log(`FAILED ${c.id}: ${outcomes[index].error.code}`);
-        }
-      }
-    }));
-    metadata.finished_at = new Date().toISOString();
+    let checkpointFailure = null;
+    try {
+      const workers = await Promise.allSettled(Array.from({ length: options.concurrency }, async () => {
+        try {
+          while (!checkpointFailure && cursor < pending.length) {
+            const c = pending[cursor++], t0 = Date.now();
+            journal.dispatch(c.id);
+            let outcome;
+            try { outcome = { case_id: c.id, evaluation: await evaluate(c.record, checklist, 'BENCHMARK', { force: true }) }; }
+            catch (error) {
+              const observed = error.evaluation_metrics || {};
+              const status = error.status;
+              const safeStatus = (Number.isInteger(status) && status >= 100 && status <= 599) || ['timeout', 'network', 'invalid_json', 'empty'].includes(status);
+              const billing = Object.fromEntries(['billing_complete', 'unknown_call_count', 'known_usage', 'known_cost_usd'].filter(key => Object.hasOwn(observed, key)).map(key => [key, observed[key]]));
+              outcome = { case_id: c.id, error: { code: failureCode(error), ...(safeStatus ? { status } : {}) }, duration_ms: observed.duration_ms ?? Date.now() - t0, timing: observed.timing || null, usage: observed.usage || null, cost_usd: observed.cost_usd ?? null, ...billing };
+              console.log(`FAILED ${c.id}: ${outcome.error.code}`);
+            }
+            journal.finish(outcome);
+          }
+        } catch (error) { checkpointFailure = error; throw error; }
+      }));
+      const failed = workers.find(result => result.status === 'rejected');
+      if (failed) throw failed.reason;
+      outcomes = journal.outcomes();
+      metadata.finished_at = new Date().toISOString();
+    } finally { journal.close(); }
   }
   const report = buildBenchmarkReport(fixture, outcomes, metadata, checklist);
   writeReport(options.out, report);

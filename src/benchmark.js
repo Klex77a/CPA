@@ -165,6 +165,7 @@ function compareEvaluation(reference, evaluation, checklist = defaultChecklist, 
   const billing = own(source, 'billing_complete') ? {
     billing_complete: source.billing_complete === true && finite(source.cost_usd) && !(source.unknown_call_count > 0),
     unknown_call_count: Number.isSafeInteger(source.unknown_call_count) && source.unknown_call_count >= 0 ? source.unknown_call_count : source.billing_complete === true ? 0 : 1,
+    ...(source.unknown_call_count_is_upper_bound ? { unknown_call_count_is_upper_bound: true } : {}),
     known_usage: source.known_usage || null,
     known_cost_usd: finite(source.known_cost_usd) && source.known_cost_usd >= 0 ? source.known_cost_usd : finite(source.cost_usd) && source.cost_usd >= 0 ? source.cost_usd : 0,
   } : null;
@@ -241,7 +242,7 @@ function aggregateBenchmark(comparisons) {
     final_score: { compared: errors.length, missing: comparisons.length - errors.length, mean_absolute_error: mean(errors), max_absolute_error: errors.length ? Math.max(...errors) : null, inconsistent_reported: comparisons.filter((c) => c.status !== 'failed' && !c.score.report_consistent).length },
     evidence: { valid: evidenceValid, invalid: rows.length - evidenceValid, total: rows.length, rate: ratio(evidenceValid, rows.length) },
     timing: { observed_count: durations.length, missing_count: comparisons.length - durations.length, total_ms: sum(durations), mean_ms: mean(durations), p50_ms: percentile(durations, 0.5), p95_ms: percentile(durations, 0.95) },
-    cost: explicitBilling ? { observed_count: costs.length, missing_count: comparisons.length - costs.length, total_usd: billingComplete ? sum(costs) : null, known_total_usd: knownCost, mean_per_observed_case_usd: mean(costs), complete: billingComplete, unknown_call_count: unknownCalls, accounting_version: 'provider_usage_presence_v1' } : { observed_count: costs.length, missing_count: comparisons.length - costs.length, total_usd: sum(costs), mean_per_observed_case_usd: mean(costs), complete: costs.length === comparisons.length },
+    cost: explicitBilling ? { observed_count: costs.length, missing_count: comparisons.length - costs.length, total_usd: billingComplete ? sum(costs) : null, known_total_usd: knownCost, mean_per_observed_case_usd: mean(costs), complete: billingComplete, unknown_call_count: unknownCalls, ...(comparisons.some(c => c.unknown_call_count_is_upper_bound) ? { unknown_call_count_is_upper_bound: true } : {}), accounting_version: 'provider_usage_presence_v1' } : { observed_count: costs.length, missing_count: comparisons.length - costs.length, total_usd: sum(costs), mean_per_observed_case_usd: mean(costs), complete: costs.length === comparisons.length },
   };
 }
 
