@@ -80,6 +80,8 @@ function recordUsage(metrics, input, output, thoughts = 0, reported = true) {
   return usage;
 }
 
+const withSchema = (system, schema) => schema ? `${system}\n\nJSON SCHEMA ОТВЕТА:\n${JSON.stringify(schema)}` : system;
+
 async function gemini(system, user, schema, metrics) {
   if (!cfg.keys.gemini) throw new Error('Не задан GEMINI_API_KEY в .env');
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(cfg.model)}:generateContent`;
@@ -91,7 +93,7 @@ async function gemini(system, user, schema, metrics) {
   if (cfg.MAX_OUTPUT_TOKENS) generationConfig.maxOutputTokens = cfg.MAX_OUTPUT_TOKENS;
   const useSchema = schema && schemaSupported && cfg.STRUCTURED_OUTPUT;
   if (useSchema) generationConfig.responseJsonSchema = schema;
-  const body = { systemInstruction: { parts: [{ text: system }] }, contents: [{ role: 'user', parts: [{ text: user }] }], generationConfig };
+  const body = { systemInstruction: { parts: [{ text: useSchema ? system : withSchema(system, schema) }] }, contents: [{ role: 'user', parts: [{ text: user }] }], generationConfig };
   let j;
   try {
     j = await withRetry(() => postJson(url, { 'x-goog-api-key': cfg.keys.gemini }, body, metrics), metrics);
@@ -100,6 +102,7 @@ async function gemini(system, user, schema, metrics) {
       console.warn('[llm] API не принял responseJsonSchema — продолжаю без схемы (только серверная валидация)');
       schemaSupported = false;
       delete generationConfig.responseJsonSchema;
+      body.systemInstruction.parts[0].text = withSchema(system, schema);
       j = await withRetry(() => postJson(url, { 'x-goog-api-key': cfg.keys.gemini }, body, metrics), metrics);
     } else throw e;
   }
@@ -116,7 +119,7 @@ async function gemini(system, user, schema, metrics) {
 async function deepseek(system, user, schema, metrics) {
   if (!cfg.keys.deepseek) throw new Error('Не задан DEEPSEEK_API_KEY в .env');
   // JSON Output у DeepSeek гарантирует только валидный JSON, схему API не принимает — передаём её в инструкции.
-  const content = schema ? `${system}\n\nJSON SCHEMA ОТВЕТА:\n${JSON.stringify(schema)}` : system;
+  const content = withSchema(system, schema);
   const body = {
     model: cfg.model,
     response_format: { type: 'json_object' },
@@ -144,7 +147,7 @@ async function openai(system, user, schema, metrics) {
     model: cfg.model,
     temperature: cfg.TEMPERATURE ?? 0,
     response_format: { type: 'json_object' },
-    messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+    messages: [{ role: 'system', content: withSchema(system, schema) }, { role: 'user', content: user }],
   };
   if (cfg.MAX_OUTPUT_TOKENS) body.max_completion_tokens = cfg.MAX_OUTPUT_TOKENS;
   const j = await withRetry(() => postJson(`${cfg.OPENAI_BASE_URL}/chat/completions`, { Authorization: `Bearer ${cfg.keys.openai}` }, body, metrics), metrics);
@@ -163,7 +166,7 @@ async function anthropic(system, user, schema, metrics) {
     model: cfg.model,
     max_tokens: cfg.MAX_OUTPUT_TOKENS || 8192,
     temperature: cfg.TEMPERATURE ?? 0,
-    system,
+    system: withSchema(system, schema),
     messages: [{ role: 'user', content: user }],
   }, metrics), metrics);
   metrics.structured = false;
